@@ -227,21 +227,42 @@ app.post("/send", async (req, res) => {
     // 3) wait & handle tools
     await waitForRun(thread_id, run.id);
 
-    // 4) fetch messages and return the latest assistant content
-    const list = await fetch(`https://api.openai.com/v1/threads/${thread_id}/messages?limit=10`, {
-      headers: OAI_HEADERS,
-    }).then(r => r.json());
+   // 4) fetch messages and normalize output for the UI
+const list = await fetch(
+  `https://api.openai.com/v1/threads/${thread_id}/messages?limit=10`,
+  { headers: OAI_HEADERS }
+).then(r => r.json());
 
-    const lastAssistant = (list.data || []).find(msg => msg.role === "assistant");
-    const raw = lastAssistant?.content?.[0]?.text?.value ?? "";
-    let data;
-    try { data = raw ? JSON.parse(raw) : { message: "" }; }
-    catch { data = { raw }; }
+const assistantMsg = (list.data || []).find(m => m.role === "assistant");
 
-    res.json({ ok: true, data });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
+// flatten all text parts (handles multi-part messages)
+const textParts = (assistantMsg?.content || [])
+  .filter(p => p.type === "text")
+  .map(p => p.text?.value || "")
+  .join("\n")
+  .trim();
+
+// pull out file-search citations if present (optional, nice for UI)
+const annotations =
+  assistantMsg?.content?.flatMap(p => (p.type === "text" ? p.text?.annotations || [] : [])) || [];
+const citations = annotations
+  .filter(a => a.type === "file_citation")
+  .map(a => ({ file_id: a.file_citation.file_id, start: a.start_index, end: a.end_index }));
+
+// always return a simple `message`, but keep rich data too
+let message = textParts;
+let parsed = null;
+try {
+  parsed = textParts ? JSON.parse(textParts) : null;
+  if (parsed && typeof parsed.message === "string") message = parsed.message;
+} catch { /* not JSON; keep raw text */ }
+
+return res.json({
+  ok: true,
+  message: message || "",
+  raw: textParts || "",
+  parsed,
+  citations,
 });
 
 // ---------- Static + catch-all (AFTER API routes) ----------
