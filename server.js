@@ -6,19 +6,14 @@ import jwt from "jsonwebtoken";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// --- Setup ---
 const app = express();
 app.use(express.json());
 
+// ---------- paths ----------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// --- CORS ---
-/**
- * Allow your production hosts and local dev.
- * Set ALLOWED_ORIGINS in Render as a comma-separated list if needed.
- * e.g. "https://metskinbot.onrender.com,https://assist.maximisedai.com"
- */
+// ---------- CORS (lock down with ALLOWED_ORIGINS in prod) ----------
 const ALLOWED = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map(s => s.trim())
@@ -26,56 +21,31 @@ const ALLOWED = (process.env.ALLOWED_ORIGINS || "")
 
 app.use(
   cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // curl / same-origin
+    origin(origin, cb) {
+      if (!origin) return cb(null, true); // same-origin/curl
       try {
+        const host = new URL(origin).host.toLowerCase();
         const ok =
-          origin.startsWith("http://localhost") ||
-          origin.startsWith("http://127.0.0.1") ||
+          host.startsWith("localhost:") ||
           ALLOWED.includes(origin) ||
-          // quick helpers for common patterns:
-          /\.assist\.maximisedai\.com$/i.test(new URL(origin).hostname) ||
-          /\.onrender\.com$/i.test(new URL(origin).hostname);
-
-        return cb(null, !!ok);
+          host.endsWith(".onrender.com") ||
+          host.endsWith(".maximisedai.com");
+        cb(null, ok);
       } catch {
-        return cb(null, false);
+        cb(null, false);
       }
     },
     credentials: false,
   })
 );
 
-// --- Tenants (by Host header) ---
-const TENANTS = {
-  "metamorphosis.assist.maximisedai.com": {
-    ASSISTANT_ID: process.env.ASST_METAMORPHOSIS || process.env.ASST_DEFAULT,
-    VECTOR_STORE_ID: process.env.VS_METAMORPHOSIS || process.env.VS_DEFAULT,
-  },
-  "assist.maximisedai.com": {
-    ASSISTANT_ID: process.env.ASST_DEFAULT,
-    VECTOR_STORE_ID: process.env.VS_DEFAULT,
-  },
-  // onrender default
-  "metskinbot.onrender.com": {
-    ASSISTANT_ID: process.env.ASST_DEFAULT,
-    VECTOR_STORE_ID: process.env.VS_DEFAULT,
-  },
-};
-app.use((req, _res, next) => {
-  const host = (req.headers.host || "").toLowerCase();
-  req.tenant =
-    TENANTS[host] || { ASSISTANT_ID: process.env.ASST_DEFAULT, VECTOR_STORE_ID: process.env.VS_DEFAULT };
-  next();
-});
-
-// --- ENV / OpenAI headers ---
+// ---------- Env / OpenAI headers ----------
 const {
   OPENAI_API_KEY,
   JWT_SECRET,
-  APP_BASE_URL,       // optional: your OTHER backend (public URL only)
-  BOT_APP_TOKEN,      // bearer for APP_BASE_URL
-  MAKE_WEBHOOK_URL,   // fallback for tool call
+  APP_BASE_URL,     // optional: other backend you call from a tool (public URL only)
+  BOT_APP_TOKEN,    // bearer for APP_BASE_URL
+  MAKE_WEBHOOK_URL, // optional fallback
 } = process.env;
 
 if (!OPENAI_API_KEY) throw new Error("Missing OPENAI_API_KEY");
@@ -87,23 +57,39 @@ const OAI_HEADERS = {
   "OpenAI-Beta": "assistants=v2", // REQUIRED for v2
 };
 
-// --- Utility: wait/poll run & handle tool calls ---
-async function waitForRun(threadId, runId) {
-  const deadline = Date.now() + 60_000;
+// ---------- Multi-tenant (by host header) ----------
+const TENANTS = {
+  "metamorphosis.assist.maximisedai.com": {
+    ASSISTANT_ID: process.env.ASST_METAMORPHOSIS || process.env.ASST_DEFAULT,
+    VECTOR_STORE_ID: process.env.VS_METAMORPHOSIS || process.env.VS_DEFAULT,
+  },
+  "metskinbot.onrender.com": {
+    ASSISTANT_ID: process.env.ASST_DEFAULT,
+    VECTOR_STORE_ID: process.env.VS_DEFAULT,
+  },
+};
+function getTenant(req) {
+  const host = (req.headers.host || "").toLowerCase();
+  return TENANTS[host] || { ASSISTANT_ID: process.env.ASST_DEFAULT, VECTOR_STORE_ID: process.env.VS_DEFAULT };
+}
 
+// ---------- Helpers ----------
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function waitForRun(threadId, runId) {
+  const deadline = Date.now() + 60_000; // 60s budget
   while (Date.now() < deadline) {
-    const r = await fetch(`https://api.openai.com/v1/threads/runs/${runId}`, {
-      headers: OAI_HEADERS,
-    });
+    const r = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, { headers: OAI_HEADERS });
     const data = await r.json();
     const status = data.status;
 
     if (status === "queued" || status === "in_progress") {
-      await new Promise(res => setTimeout(res, 800));
+      await sleep(800);
       continue;
     }
 
     if (status === "requires_action" && data.required_action?.submit_tool_outputs) {
+      // Handle tool calls
       for (const call of data.required_action.submit_tool_outputs.tool_calls || []) {
         const fn = call.function?.name;
         const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
@@ -114,10 +100,7 @@ async function waitForRun(threadId, runId) {
             if (APP_BASE_URL && BOT_APP_TOKEN) {
               const resp = await fetch(`${APP_BASE_URL}/api/requests/samples`, {
                 method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  Authorization: `Bearer ${BOT_APP_TOKEN}`,
-                },
+                headers: { "Content-Type": "application/json", Authorization: `Bearer ${BOT_APP_TOKEN}` },
                 body: JSON.stringify(args),
               });
               output = { ok: resp.ok, status: resp.status };
@@ -138,15 +121,16 @@ async function waitForRun(threadId, runId) {
           output = { ok: false, error: String(err?.message || err) };
         }
 
-        await fetch(`https://api.openai.com/v1/threads/runs/${runId}/submit_tool_outputs`, {
-          method: "POST",
-          headers: OAI_HEADERS,
-          body: JSON.stringify({
-            tool_outputs: [{ tool_call_id: call.id, output: JSON.stringify(output) }],
-          }),
-        });
+        await fetch(
+          `https://api.openai.com/v1/threads/${threadId}/runs/${runId}/submit_tool_outputs`,
+          {
+            method: "POST",
+            headers: OAI_HEADERS,
+            body: JSON.stringify({ tool_outputs: [{ tool_call_id: call.id, output: JSON.stringify(output) }] }),
+          }
+        );
       }
-      await new Promise(res => setTimeout(res, 500));
+      await sleep(500);
       continue;
     }
 
@@ -155,13 +139,16 @@ async function waitForRun(threadId, runId) {
   throw new Error("Run timeout");
 }
 
-// ---------- API ROUTES (before static/catch-all) ----------
+// ---------- API ROUTES (place BEFORE static/catch-all) ----------
 
-// Health
-app.get("/health", (_req, res) => res.json({ ok: true, tenant: _req.tenant }));
+// Health (handy for Render + domain wiring)
+app.get("/health", (req, res) => res.json({ ok: true, tenant: getTenant(req) }));
 
-// Dev token generator (enable only while testing)
-if ((process.env.DEV_TOKEN_ENABLED || "").toLowerCase() === "true") {
+// Dev token route (enable only while testing)
+const devEnabled = (process.env.DEV_TOKEN_ENABLED || "").toLowerCase() === "true";
+console.log(`[BOOT] DEV_TOKEN_ENABLED=${devEnabled}`);
+if (devEnabled) {
+  console.log("[BOOT] Mounting /dev/make-token");
   app.post("/dev/make-token", (req, res) => {
     try {
       const { email = "", name = "Guest", campaign = "dev" } = req.body || {};
@@ -173,13 +160,14 @@ if ((process.env.DEV_TOKEN_ENABLED || "").toLowerCase() === "true") {
   });
 }
 
-// Start chat: validate token, create thread, return assistant_id
+// Start: verify token → create thread → return ids
 app.get("/start-chat", async (req, res) => {
   try {
     const { token } = req.query;
     if (!token) return res.status(400).json({ ok: false, error: "Missing token" });
 
     const payload = jwt.verify(token, JWT_SECRET); // {email,name,campaign}
+    const tenant = getTenant(req);
 
     const r = await fetch("https://api.openai.com/v1/threads", {
       method: "POST",
@@ -189,7 +177,7 @@ app.get("/start-chat", async (req, res) => {
           lead_email: payload.email || "",
           lead_name: payload.name || "",
           campaign: payload.campaign || "email",
-          tenant_assistant: req.tenant.ASSISTANT_ID,
+          tenant_assistant: tenant.ASSISTANT_ID || "",
         },
       }),
     });
@@ -200,45 +188,51 @@ app.get("/start-chat", async (req, res) => {
     }
 
     const thread = await r.json();
-    res.json({ ok: true, thread_id: thread.id, assistant_id: req.tenant.ASSISTANT_ID });
+    res.json({ ok: true, thread_id: thread.id, assistant_id: tenant.ASSISTANT_ID });
   } catch (e) {
     res.status(401).json({ ok: false, error: "Invalid or expired link" });
   }
 });
 
-// Send a message & run assistant
+// Send: add message → run assistant → wait → return latest assistant content
 app.post("/send", async (req, res) => {
   try {
     const { thread_id, text } = req.body || {};
     if (!thread_id || !text) return res.status(400).json({ ok: false, error: "thread_id and text required" });
 
-    // Add user message
-    const mr = await fetch(`https://api.openai.com/v1/threads/${thread_id}/messages`, {
+    // 1) add user message
+    const m = await fetch(`https://api.openai.com/v1/threads/${thread_id}/messages`, {
       method: "POST",
       headers: OAI_HEADERS,
       body: JSON.stringify({ role: "user", content: text }),
     });
-    if (!mr.ok) {
-      const body = await mr.text();
-      return res.status(502).json({ ok: false, error: "OpenAI add message failed", body });
+    if (!m.ok) {
+      const body = await m.text();
+      return res.status(502).json({ ok: false, where: "messages.create", body });
     }
 
-    // Create run with tenant assistant
-    const run = await fetch("https://api.openai.com/v1/threads/runs", {
+    // 2) create run
+    const tenant = getTenant(req);
+    const runResp = await fetch(`https://api.openai.com/v1/threads/${thread_id}/runs`, {
       method: "POST",
       headers: OAI_HEADERS,
-      body: JSON.stringify({ assistant_id: req.tenant.ASSISTANT_ID, thread_id }),
-    }).then(r => r.json());
+      body: JSON.stringify({ assistant_id: tenant.ASSISTANT_ID }),
+    });
+    if (!runResp.ok) {
+      const body = await runResp.text();
+      return res.status(502).json({ ok: false, where: "runs.create", body });
+    }
+    const run = await runResp.json();
 
+    // 3) wait & handle tools
     await waitForRun(thread_id, run.id);
 
-    // Get latest assistant message
-    const msgs = await fetch(
-      `https://api.openai.com/v1/threads/${thread_id}/messages?limit=10`,
-      { headers: OAI_HEADERS }
-    ).then(r => r.json());
+    // 4) fetch messages and return the latest assistant content
+    const list = await fetch(`https://api.openai.com/v1/threads/${thread_id}/messages?limit=10`, {
+      headers: OAI_HEADERS,
+    }).then(r => r.json());
 
-    const lastAssistant = (msgs.data || []).find(m => m.role === "assistant");
+    const lastAssistant = (list.data || []).find(msg => msg.role === "assistant");
     const raw = lastAssistant?.content?.[0]?.text?.value ?? "";
     let data;
     try { data = raw ? JSON.parse(raw) : { message: "" }; }
@@ -249,33 +243,15 @@ app.post("/send", async (req, res) => {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
-// log so we can see it in Render logs
-const devEnabled = (process.env.DEV_TOKEN_ENABLED || "").toLowerCase() === "true";
-console.log(`[BOOT] DEV_TOKEN_ENABLED=${devEnabled}`);
 
-if (devEnabled) {
-  console.log("[BOOT] Mounting /dev/make-token");
-  app.post("/dev/make-token", (req, res) => {
-    try {
-      const { email = "", name = "Guest", campaign = "dev" } = req.body || {};
-      const token = jwt.sign({ email, name, campaign }, process.env.JWT_SECRET, { expiresIn: "7d" });
-      res.json({ ok: true, token });
-    } catch (e) {
-      res.status(500).json({ ok: false, error: "Token generation failed" });
-    }
-  });
-}
-// ---------- STATIC + CATCH-ALL (after API routes) ----------
+// ---------- Static + catch-all (AFTER API routes) ----------
 app.use(express.static(path.join(__dirname, "public")));
 app.get("/", (_req, res) =>
   res.status(200).send('Server running. Open <a href="/index.html">/index.html</a> with ?token=...')
 );
-app.get("*", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
+app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
-// ---------- LISTEN ----------
+// ---------- Listen (Render needs 0.0.0.0 + provided PORT) ----------
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, "0.0.0.0", () => console.log(`Listening on :${PORT}`));
-
 
