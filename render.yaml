@@ -1,30 +1,60 @@
 services:
   - type: web
-    name: maximised-assistant
+    name: metskin-asst
     env: node
-    region: oregon            # pick close to your users
-    plan: starter             # upgrade if you need wildcard domains
-    buildCommand: npm ci
+    region: oregon
+    plan: starter
+    # Keep build light & fast: install only prod deps, use cached Yarn
+    buildCommand: |
+      yarn install --frozen-lockfile --production=true
     startCommand: node server.js
     healthCheckPath: /health
-    autoDeploy: true
+    autoDeploy: false            # flip to true when you want automatic deploys
+    pullRequestPreviewsEnabled: false
+
     envVars:
-      - key: OPENAI_API_KEY   # set in dashboard (secret)
+      # Runtime/platform
+      - key: NODE_VERSION
+        value: 20
+      - key: YARN_PRODUCTION
+        value: "true"
+      - key: YARN_CACHE_FOLDER
+        value: /opt/render/project/.yarn-cache
+
+      # App configuration (set real secrets in dashboard)
+      - key: OPENAI_API_KEY
         sync: false
-      - key: JWT_SECRET       # set in dashboard (secret)
+      - key: JWT_SECRET
         sync: false
-      - key: BOT_APP_KEY      # set in dashboard (secret)
+
+      # Token used when this service calls YOUR other backend (if you use one)
+      - key: BOT_APP_TOKEN
         sync: false
+      # ONLY set APP_BASE_URL when that other backend is live & public.
+      # If unset, server falls back to MAKE_WEBHOOK_URL in your tool handler.
       - key: APP_BASE_URL
-        value: https://api.metskin.co
+        sync: false
+
+      # Optional Make.com fallback for tool calls
+      - key: MAKE_WEBHOOK_URL
+        sync: false
+
+      # Public host + CORS
       - key: PUBLIC_BASE_URL
-        value: https://assist.maximisedai.com
+        value: https://metamorphosis.assist.maximisedai.com
+      - key: ALLOWED_ORIGINS
+        value: https://metamorphosis.assist.maximisedai.com,https://metskinbot.onrender.com
+
+      # Assistant / vector IDs (fill with your real IDs)
       - key: ASST_DEFAULT
-        value: asst_XXXXXXXX   # default assistant id
+        sync: false
       - key: VS_DEFAULT
-        value: vs_XXXXXXXX     # optional; not needed unless you manage via API
+        sync: false
       - key: ASST_METAMORPHOSIS
-        value: asst_YYYYYYYY   # tenant-specific assistant id
-      # turn off in prod:
+        sync: false
+      - key: VS_METAMORPHOSIS
+        sync: false
+
+      # Dev convenience; set to false after verification
       - key: DEV_TOKEN_ENABLED
-        value: "false"
+        value: "true"
