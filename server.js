@@ -160,60 +160,13 @@ if (devEnabled) {
   });
 }
 
-// Start: verify token → create thread → return ids
-app.get("/start-chat", async (req, res) => {
-  try {
-    const { token } = req.query;
-    if (!token) return res.status(400).json({ ok: false, error: "Missing token" });
-
-    const payload = jwt.verify(token, JWT_SECRET); // {email,name,campaign}
-    const tenant = getTenant(req);
-
-    const r = await fetch("https://api.openai.com/v1/threads", {
-      method: "POST",
-      headers: OAI_HEADERS,
-      body: JSON.stringify({
-        metadata: {
-          lead_email: payload.email || "",
-          lead_name: payload.name || "",
-          campaign: payload.campaign || "email",
-          tenant_assistant: tenant.ASSISTANT_ID || "",
-        },
-      }),
-    });
-
-    if (!r.ok) {
-      const body = await r.text();
-      return res.status(502).json({ ok: false, error: "OpenAI thread create failed", body });
-    }
-
-    const thread = await r.json();
-    res.json({ ok: true, thread_id: thread.id, assistant_id: tenant.ASSISTANT_ID });
-  } catch (e) {
-    res.status(401).json({ ok: false, error: "Invalid or expired link" });
-  }
-});
-
-// Send: add message → run assistant → wait → return latest assistant content
 app.post("/send", async (req, res) => {
   try {
     const { thread_id, text } = req.body || {};
     if (!thread_id || typeof text !== "string" || !text.trim()) {
       return res.status(400).json({ ok: false, error: "thread_id and text required" });
     }
-    await fetch(`https://api.openai.com/v1/threads/${thread_id}/runs`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-        'OpenAI-Beta': 'assistants=v2'
-      },
-      body: JSON.stringify({
-        assistant_id: tenant.ASSISTANT_ID,
-        tool_resources: { file_search: { vector_store_ids: [tenant.VECTOR_STORE_ID] } }
-      })
-    });
-    
+
     // 1) add user message
     const m = await fetch(`https://api.openai.com/v1/threads/${thread_id}/messages`, {
       method: "POST",
@@ -225,36 +178,36 @@ app.post("/send", async (req, res) => {
       return res.status(502).json({ ok: false, where: "messages.create", body });
     }
 
-    // 2) resolve tenant FIRST, then create the run
-const TEN = req.tenant || getTenant(req);   // <-- move/keep this ABOVE any usage
+    // 2) resolve tenant FIRST
+    const TEN = req.tenant || getTenant(req);
 
-const runResp = await fetch(`https://api.openai.com/v1/threads/${thread_id}/runs`, {
-  method: "POST",
-  headers: OAI_HEADERS,
-  body: JSON.stringify({
-    assistant_id: TEN.ASSISTANT_ID,
-    tool_resources: TEN.VECTOR_STORE_ID
-      ? { file_search: { vector_store_ids: [TEN.VECTOR_STORE_ID] } }
-      : undefined,
-  }),
-});
-if (!runResp.ok) {
-  const body = await runResp.text();
-  return res.status(502).json({ ok: false, where: "runs.create", body });
-}
-const run = await runResp.json();
+    // 3) create run (exactly once)
+    const runResp = await fetch(`https://api.openai.com/v1/threads/${thread_id}/runs`, {
+      method: "POST",
+      headers: OAI_HEADERS,
+      body: JSON.stringify({
+        assistant_id: TEN.ASSISTANT_ID,
+        tool_resources: TEN.VECTOR_STORE_ID
+          ? { file_search: { vector_store_ids: [TEN.VECTOR_STORE_ID] } }
+          : undefined,
+      }),
+    });
+    if (!runResp.ok) {
+      const body = await runResp.text();
+      return res.status(502).json({ ok: false, where: "runs.create", body });
+    }
+    const run = await runResp.json();
 
-    // 3) wait & (if needed) handle tool calls
+    // 4) wait & tools
     await waitForRun(thread_id, run.id);
 
-    // 4) fetch messages and normalize output for the UI
+    // 5) fetch + normalize to always return { message }
     const list = await fetch(
       `https://api.openai.com/v1/threads/${thread_id}/messages?limit=10`,
       { headers: OAI_HEADERS }
     ).then(r => r.json());
 
     const assistantMsg = (list.data || []).find(m => m.role === "assistant");
-
     const textParts = (assistantMsg?.content || [])
       .filter(p => p.type === "text")
       .map(p => p.text?.value || "")
@@ -272,19 +225,13 @@ const run = await runResp.json();
     try {
       parsed = textParts ? JSON.parse(textParts) : null;
       if (parsed && typeof parsed.message === "string") message = parsed.message;
-    } catch { /* not JSON; keep raw text */ }
+    } catch { /* keep raw text */ }
 
-    return res.json({
-      ok: true,
-      message: message || "",
-      raw: textParts || "",
-      parsed,
-      citations,
-    });
+    return res.json({ ok: true, message: message || "", raw: textParts || "", parsed, citations });
   } catch (err) {
     return res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
-}); // <-- keep this line: it closes the /send route
+}); // <-- final closer for the route
 
 
 // ---------- Static + catch-all (AFTER API routes) ----------
