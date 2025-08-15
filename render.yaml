@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: maximised-assistant
+    env: node
+    region: oregon            # pick close to your users
+    plan: starter             # upgrade if you need wildcard domains
+    buildCommand: npm ci
+    startCommand: node server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: OPENAI_API_KEY   # set in dashboard (secret)
+        sync: false
+      - key: JWT_SECRET       # set in dashboard (secret)
+        sync: false
+      - key: BOT_APP_KEY      # set in dashboard (secret)
+        sync: false
+      - key: APP_BASE_URL
+        value: https://api.metskin.co
+      - key: PUBLIC_BASE_URL
+        value: https://assist.maximisedai.com
+      - key: ASST_DEFAULT
+        value: asst_XXXXXXXX   # default assistant id
+      - key: VS_DEFAULT
+        value: vs_XXXXXXXX     # optional; not needed unless you manage via API
+      - key: ASST_METAMORPHOSIS
+        value: asst_YYYYYYYY   # tenant-specific assistant id
+      # turn off in prod:
+      - key: DEV_TOKEN_ENABLED
+        value: "false"

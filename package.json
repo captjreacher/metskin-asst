@@ -1,0 +1,16 @@
+{
+  "name": "metlifebot-backend",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "node-fetch": "^3.3.2",
+    "openai": "^5.12.2"
+  }
+}
