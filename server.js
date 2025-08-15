@@ -233,6 +233,46 @@ app.post("/send", async (req, res) => {
   }
 }); // <-- final closer for the route
 
+// --- START CHAT: verify token → create thread → return ids ---
+app.get("/start-chat", async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ ok: false, error: "Missing token" });
+
+    // resolve tenant first (multi-host support)
+    const TEN = req.tenant || getTenant?.(req) || {
+      ASSISTANT_ID: process.env.ASST_DEFAULT,
+      VECTOR_STORE_ID: process.env.VS_DEFAULT,
+    };
+
+    // validate link
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+
+    // create thread
+    const r = await fetch("https://api.openai.com/v1/threads", {
+      method: "POST",
+      headers: OAI_HEADERS, // already defined in your file
+      body: JSON.stringify({
+        metadata: {
+          lead_email: payload.email || "",
+          lead_name: payload.name || "",
+          campaign: payload.campaign || "email",
+          tenant_assistant: TEN.ASSISTANT_ID || "",
+        },
+      }),
+    });
+
+    if (!r.ok) {
+      const body = await r.text();
+      return res.status(502).json({ ok: false, error: "OpenAI thread create failed", body });
+    }
+
+    const thread = await r.json();
+    return res.json({ ok: true, thread_id: thread.id, assistant_id: TEN.ASSISTANT_ID });
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: "Invalid or expired link" });
+  }
+});
 
 // ---------- Static + catch-all (AFTER API routes) ----------
 app.use(express.static(path.join(__dirname, "public")));
