@@ -201,7 +201,19 @@ app.post("/send", async (req, res) => {
     if (!thread_id || typeof text !== "string" || !text.trim()) {
       return res.status(400).json({ ok: false, error: "thread_id and text required" });
     }
-
+    await fetch(`https://api.openai.com/v1/threads/${thread_id}/runs`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+        'OpenAI-Beta': 'assistants=v2'
+      },
+      body: JSON.stringify({
+        assistant_id: tenant.ASSISTANT_ID,
+        tool_resources: { file_search: { vector_store_ids: [tenant.VECTOR_STORE_ID] } }
+      })
+    });
+    
     // 1) add user message
     const m = await fetch(`https://api.openai.com/v1/threads/${thread_id}/messages`, {
       method: "POST",

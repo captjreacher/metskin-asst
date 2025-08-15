@@ -115,27 +115,38 @@
       const $out = document.getElementById("out");
       const $threadId = document.getElementById("threadId");
       const $ready = document.getElementById("ready");
-
+  
       // Helpers
       const qs = new URLSearchParams(location.search);
       let token = qs.get("token");
-
+  
       function show(obj) {
         $out.textContent = JSON.stringify(obj, null, 2);
       }
-
+  
+      // Always extract a displayable reply regardless of server shape
+      function extractReply(j) {
+        return (
+          j?.message ??
+          j?.data?.message ??
+          j?.data?.raw ??
+          j?.raw ??
+          ""
+        );
+      }
+  
       // Bind buttons
       document.getElementById("btnClear").onclick = () => show({});
       document.getElementById("btnGreet").onclick = () => {
         document.getElementById("msg").value =
           "Hello! Welcome to Metamorphosis Skincare. I can help with product advice and free samples. What’s your name and which product are you curious about?";
       };
-
+  
       document.getElementById("btnSend").onclick = async () => {
         const text = document.getElementById("msg").value;
         await sendMessage(text);
       };
-
+  
       document.getElementById("btnSample").onclick = async () => {
         const payload = {
           name: (document.getElementById("fName").value || "").trim(),
@@ -144,20 +155,19 @@
           address: (document.getElementById("fAddress").value || "").trim(),
           notes: (document.getElementById("fNotes").value || "").trim()
         };
-        // Guidance for the assistant to call the tool:
         const text =
-`Customer requests skincare samples. If details are sufficient, CALL the tool submit_sample_request with:
-${JSON.stringify(payload)}
-If anything is missing, ask one targeted follow-up before proceeding.`;
+  `Customer requests skincare samples. If details are sufficient, CALL the tool submit_sample_request with:
+  ${JSON.stringify(payload)}
+  If anything is missing, ask one targeted follow-up before proceeding.`;
         await sendMessage(text);
       };
-
+  
       document.getElementById("btnMakeToken").onclick = async () => {
         const email = document.getElementById("devEmail").value.trim();
         const name = document.getElementById("devName").value.trim() || "Guest";
         const campaign = document.getElementById("devCampaign").value.trim() || "dev";
         const $msg = document.getElementById("devMsg");
-
+  
         try {
           const r = await fetch("/dev/make-token", {
             method: "POST",
@@ -171,10 +181,10 @@ If anything is missing, ask one targeted follow-up before proceeding.`;
           $msg.textContent = "Error: " + e.message;
         }
       };
-
+  
       // Start chat if token present
       let thread_id = null;
-
+  
       async function startChat() {
         $status.textContent = "Starting chat…";
         const resp = await fetch("/start-chat?token=" + encodeURIComponent(token));
@@ -191,34 +201,44 @@ If anything is missing, ask one targeted follow-up before proceeding.`;
         $status.innerHTML = `<span class="ok">Connected.</span> You can chat below.`;
         return true;
       }
-
+  
+      // NORMALIZED send handler (this is the key change)
       async function sendMessage(text) {
         if (!thread_id) return;
-        $ready.textContent = "thinking…"; $ready.className = "warn";
+        $ready.textContent = "thinking…"; 
+        $ready.className = "warn";
+  
         const r = await fetch("/send", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ thread_id, text })
         });
-        const data = await r.json();
-        if (!r.ok) {
-          show({ error: data.error || "send failed", detail: data.detail });
-          $ready.textContent = "error"; $ready.className = "err";
+  
+        const j = await r.json();
+  
+        if (!r.ok || j?.ok === false) {
+          show({ error: j.error || "send failed", detail: j.detail || j.body || j.where });
+          $ready.textContent = "error"; 
+          $ready.className = "err";
           return;
         }
-        show(data.data);
-        $ready.textContent = "ready"; $ready.className = "ok";
+  
+        const reply = extractReply(j);
+        // Show a simple string for humans, but keep raw for debugging
+        show({ message: reply || "(no content)", raw: j.raw ?? j.data?.raw ?? null });
+  
+        $ready.textContent = "ready"; 
+        $ready.className = "ok";
       }
-
+  
       // Entry point
       if (!token) {
-        // No token → show dev generator
         $status.innerHTML = 'No token in URL. Use the dev generator below or open with <code>?token=eyJ...</code>.';
         $devBox.style.display = "block";
       } else {
         await startChat();
       }
     })();
-  </script>
+  </script>  
 </body>
 </html>
