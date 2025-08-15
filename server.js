@@ -225,23 +225,24 @@ app.post("/send", async (req, res) => {
       return res.status(502).json({ ok: false, where: "messages.create", body });
     }
 
-    // 2) create run
-    const tenant = getTenant(req);
-    const runResp = await fetch(`https://api.openai.com/v1/threads/${thread_id}/runs`, {
-      method: "POST",
-      headers: OAI_HEADERS,
-      body: JSON.stringify({
-        assistant_id: tenant.ASSISTANT_ID,
-        tool_resources: tenant.VECTOR_STORE_ID
-          ? { file_search: { vector_store_ids: [tenant.VECTOR_STORE_ID] } }
-          : undefined,
-      }),
-    });
-    if (!runResp.ok) {
-      const body = await runResp.text();
-      return res.status(502).json({ ok: false, where: "runs.create", body });
-    }
-    const run = await runResp.json();
+    // 2) resolve tenant FIRST, then create the run
+const TEN = req.tenant || getTenant(req);   // <-- move/keep this ABOVE any usage
+
+const runResp = await fetch(`https://api.openai.com/v1/threads/${thread_id}/runs`, {
+  method: "POST",
+  headers: OAI_HEADERS,
+  body: JSON.stringify({
+    assistant_id: TEN.ASSISTANT_ID,
+    tool_resources: TEN.VECTOR_STORE_ID
+      ? { file_search: { vector_store_ids: [TEN.VECTOR_STORE_ID] } }
+      : undefined,
+  }),
+});
+if (!runResp.ok) {
+  const body = await runResp.text();
+  return res.status(502).json({ ok: false, where: "runs.create", body });
+}
+const run = await runResp.json();
 
     // 3) wait & (if needed) handle tool calls
     await waitForRun(thread_id, run.id);
