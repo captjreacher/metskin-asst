@@ -198,7 +198,9 @@ app.get("/start-chat", async (req, res) => {
 app.post("/send", async (req, res) => {
   try {
     const { thread_id, text } = req.body || {};
-    if (!thread_id || !text) return res.status(400).json({ ok: false, error: "thread_id and text required" });
+    if (!thread_id || typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ ok: false, error: "thread_id and text required" });
+    }
 
     // 1) add user message
     const m = await fetch(`https://api.openai.com/v1/threads/${thread_id}/messages`, {
@@ -216,7 +218,12 @@ app.post("/send", async (req, res) => {
     const runResp = await fetch(`https://api.openai.com/v1/threads/${thread_id}/runs`, {
       method: "POST",
       headers: OAI_HEADERS,
-      body: JSON.stringify({ assistant_id: tenant.ASSISTANT_ID }),
+      body: JSON.stringify({
+        assistant_id: tenant.ASSISTANT_ID,
+        tool_resources: tenant.VECTOR_STORE_ID
+          ? { file_search: { vector_store_ids: [tenant.VECTOR_STORE_ID] } }
+          : undefined,
+      }),
     });
     if (!runResp.ok) {
       const body = await runResp.text();
@@ -224,46 +231,48 @@ app.post("/send", async (req, res) => {
     }
     const run = await runResp.json();
 
-    // 3) wait & handle tools
+    // 3) wait & (if needed) handle tool calls
     await waitForRun(thread_id, run.id);
 
-   // 4) fetch messages and normalize output for the UI
-const list = await fetch(
-  `https://api.openai.com/v1/threads/${thread_id}/messages?limit=10`,
-  { headers: OAI_HEADERS }
-).then(r => r.json());
+    // 4) fetch messages and normalize output for the UI
+    const list = await fetch(
+      `https://api.openai.com/v1/threads/${thread_id}/messages?limit=10`,
+      { headers: OAI_HEADERS }
+    ).then(r => r.json());
 
-const assistantMsg = (list.data || []).find(m => m.role === "assistant");
+    const assistantMsg = (list.data || []).find(m => m.role === "assistant");
 
-// flatten all text parts (handles multi-part messages)
-const textParts = (assistantMsg?.content || [])
-  .filter(p => p.type === "text")
-  .map(p => p.text?.value || "")
-  .join("\n")
-  .trim();
+    const textParts = (assistantMsg?.content || [])
+      .filter(p => p.type === "text")
+      .map(p => p.text?.value || "")
+      .join("\n")
+      .trim();
 
-// pull out file-search citations if present (optional, nice for UI)
-const annotations =
-  assistantMsg?.content?.flatMap(p => (p.type === "text" ? p.text?.annotations || [] : [])) || [];
-const citations = annotations
-  .filter(a => a.type === "file_citation")
-  .map(a => ({ file_id: a.file_citation.file_id, start: a.start_index, end: a.end_index }));
+    const annotations =
+      assistantMsg?.content?.flatMap(p => (p.type === "text" ? p.text?.annotations || [] : [])) || [];
+    const citations = annotations
+      .filter(a => a.type === "file_citation")
+      .map(a => ({ file_id: a.file_citation.file_id, start: a.start_index, end: a.end_index }));
 
-// always return a simple `message`, but keep rich data too
-let message = textParts;
-let parsed = null;
-try {
-  parsed = textParts ? JSON.parse(textParts) : null;
-  if (parsed && typeof parsed.message === "string") message = parsed.message;
-} catch { /* not JSON; keep raw text */ }
+    let message = textParts;
+    let parsed = null;
+    try {
+      parsed = textParts ? JSON.parse(textParts) : null;
+      if (parsed && typeof parsed.message === "string") message = parsed.message;
+    } catch { /* not JSON; keep raw text */ }
 
-return res.json({
-  ok: true,
-  message: message || "",
-  raw: textParts || "",
-  parsed,
-  citations,
-});
+    return res.json({
+      ok: true,
+      message: message || "",
+      raw: textParts || "",
+      parsed,
+      citations,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+}); // <-- keep this line: it closes the /send route
+
 
 // ---------- Static + catch-all (AFTER API routes) ----------
 app.use(express.static(path.join(__dirname, "public")));
