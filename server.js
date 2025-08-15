@@ -249,7 +249,22 @@ app.post("/send", async (req, res) => {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
+// log so we can see it in Render logs
+const devEnabled = (process.env.DEV_TOKEN_ENABLED || "").toLowerCase() === "true";
+console.log(`[BOOT] DEV_TOKEN_ENABLED=${devEnabled}`);
 
+if (devEnabled) {
+  console.log("[BOOT] Mounting /dev/make-token");
+  app.post("/dev/make-token", (req, res) => {
+    try {
+      const { email = "", name = "Guest", campaign = "dev" } = req.body || {};
+      const token = jwt.sign({ email, name, campaign }, process.env.JWT_SECRET, { expiresIn: "7d" });
+      res.json({ ok: true, token });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: "Token generation failed" });
+    }
+  });
+}
 // ---------- STATIC + CATCH-ALL (after API routes) ----------
 app.use(express.static(path.join(__dirname, "public")));
 app.get("/", (_req, res) =>
@@ -261,7 +276,6 @@ app.get("*", (_req, res) => {
 
 // ---------- LISTEN ----------
 const PORT = process.env.PORT || 3001;
-// Bind to 0.0.0.0 for Render
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Assistant server listening on :${PORT}`);
-});
+app.listen(PORT, "0.0.0.0", () => console.log(`Listening on :${PORT}`));
+
+
