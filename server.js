@@ -57,6 +57,77 @@ const OAI_HEADERS = {
   "OpenAI-Beta": "assistants=v2", // REQUIRED for v2
 };
 
+// ---------- Notion (optional) ----------
+const NOTION_TOKEN = process.env.NOTION_TOKEN || "";
+const NOTION_DB_ID = process.env.NOTION_DB_ID || "";
+const notionEnabled = Boolean(NOTION_TOKEN && NOTION_DB_ID);
+
+const NOTION_H = notionEnabled
+  ? {
+      Authorization: `Bearer ${NOTION_TOKEN}`,
+      "Notion-Version": "2022-06-28",
+      "Content-Type": "application/json",
+    }
+  : null;
+
+async function notionCreateSampleLog({ threadId, runId, args, downstream, meta = {} }) {
+  if (!notionEnabled) return null;
+
+  // Build a readable title
+  const who = args?.name || args?.email || meta.lead_email || "anonymous";
+  const prod = args?.product || "Unknown product";
+  const title = `Sample request — ${prod} — ${who}`;
+
+  const lines = [
+    `Thread: ${threadId}`,
+    `Run: ${runId}`,
+    `Name: ${args?.name || ""}`,
+    `Email: ${args?.email || ""}`,
+    `Product: ${prod}`,
+    `Address: ${args?.address || ""}`,
+    `Notes: ${args?.notes || ""}`,
+    `Consent: yes`,
+    `Downstream: ${JSON.stringify(downstream)}`,
+  ].filter(Boolean);
+
+  const blocks = lines.map(t => ({
+    object: "block",
+    type: "paragraph",
+    paragraph: { rich_text: [{ type: "text", text: { content: t } }] },
+  }));
+
+  const body = {
+    parent: { database_id: NOTION_DB_ID },
+    properties: { Name: { title: [{ type: "text", text: { content: title } }] } },
+    children: blocks,
+  };
+
+  const r = await fetch("https://api.notion.com/v1/pages", {
+    method: "POST",
+    headers: NOTION_H,
+    body: JSON.stringify(body),
+  });
+
+  if (!r.ok) {
+    const err = await r.text().catch(() => "");
+    console.warn("[Notion] create failed:", r.status, err);
+    return null;
+  }
+  const j = await r.json().catch(() => ({}));
+  return j?.id || null;
+}
+
+async function fetchThreadMetadata(threadId) {
+  try {
+    const r = await fetch(`https://api.openai.com/v1/threads/${threadId}`, { headers: OAI_HEADERS });
+    if (!r.ok) return {};
+    const j = await r.json();
+    return j?.metadata || {};
+  } catch {
+    return {};
+  }
+}
+
 // ---------- Multi-tenant (by host header) ----------
 const TENANTS = {
   "metamorphosis.assist.maximisedai.com": {
@@ -97,6 +168,7 @@ async function waitForRun(threadId, runId) {
 
         try {
           if (fn === "submit_sample_request") {
+            // Downstream submit
             if (APP_BASE_URL && BOT_APP_TOKEN) {
               const resp = await fetch(`${APP_BASE_URL}/api/requests/samples`, {
                 method: "POST",
@@ -114,6 +186,24 @@ async function waitForRun(threadId, runId) {
             } else {
               output = { ok: false, error: "No downstream configured" };
             }
+
+            // 🔵 NEW: Log to Notion (best-effort)
+            try {
+              const meta = await fetchThreadMetadata(threadId);
+              await notionCreateSampleLog({
+                threadId,
+                runId,
+                args,
+                downstream: output,
+                meta: {
+                  lead_email: meta?.lead_email || meta?.lead_email_address || "",
+                  lead_name: meta?.lead_name || "",
+                  campaign: meta?.campaign || "",
+                },
+              });
+            } catch (e) {
+              console.warn("[Notion] log failed:", e?.message || e);
+            }
           } else {
             output = { ok: false, error: `Unknown tool: ${fn}` };
           }
@@ -121,6 +211,7 @@ async function waitForRun(threadId, runId) {
           output = { ok: false, error: String(err?.message || err) };
         }
 
+        // Tell OpenAI about our tool output so the run can continue/finish
         await fetch(
           `https://api.openai.com/v1/threads/${threadId}/runs/${runId}/submit_tool_outputs`,
           {
@@ -142,7 +233,18 @@ async function waitForRun(threadId, runId) {
 // ---------- API ROUTES (place BEFORE static/catch-all) ----------
 
 // Health (handy for Render + domain wiring)
-app.get("/health", (req, res) => res.json({ ok: true, tenant: getTenant(req) }));
+app.get("/health", (req, res) => res.json({ ok: true, tenant: getTenant(req), notionEnabled }));
+
+// Diagnostics: Notion ping
+app.get("/diagnostics/notion", async (_req, res) => {
+  if (!notionEnabled) return res.json({ ok: false, error: "NOTION_TOKEN/NOTION_DB_ID not configured" });
+  try {
+    const r = await fetch("https://api.notion.com/v1/users/me", { headers: NOTION_H });
+    res.json({ ok: r.ok, status: r.status });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
 
 // Dev token route (enable only while testing)
 const devEnabled = (process.env.DEV_TOKEN_ENABLED || "").toLowerCase() === "true";
@@ -251,7 +353,7 @@ app.get("/start-chat", async (req, res) => {
     // create thread
     const r = await fetch("https://api.openai.com/v1/threads", {
       method: "POST",
-      headers: OAI_HEADERS, // already defined in your file
+      headers: OAI_HEADERS,
       body: JSON.stringify({
         metadata: {
           lead_email: payload.email || "",
@@ -283,5 +385,4 @@ app.get("*", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.h
 
 // ---------- Listen (Render needs 0.0.0.0 + provided PORT) ----------
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, "0.0.0.0", () => console.log(`Listening on :${PORT}`));
-
+app.listen(PORT, "0.0.0.0", () => console.log(`Listening on :${PORT}, Notion=${notionEnabled ? "on" : "off"}`));
