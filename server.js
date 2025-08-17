@@ -30,6 +30,12 @@ const ADMIN_SOURCE = process.env.ADMIN_TOKEN
 // one-time boot log you can see in Render Logs (value not printed)
 console.log(`[boot] admin source=${ADMIN_SOURCE} len=${ADMIN.length}`);
 
+const ADMIN = (process.env.ADMIN_TOKEN || process.env.ADMIN_API_TOKEN || '').trim();
+const ADMIN_SOURCE = process.env.ADMIN_TOKEN ? 'ADMIN_TOKEN'
+                    : process.env.ADMIN_API_TOKEN ? 'ADMIN_API_TOKEN'
+                    : 'none';
+const ADMIN_LAST4 = ADMIN ? ADMIN.slice(-4) : null;
+
 // ---------- Helpers ----------
 function requireAdminBearer(req, res, next) {
   const header = req.headers.authorization || '';
@@ -179,19 +185,20 @@ app.get('/health', (req, res) => {
   res.json({
     ok: true,
     time: nowIso(),
-    admin: { source: ADMIN_SOURCE, len: ADMIN.length }, // shows which env var is used
-    env: {
-      port: String(PORT),
-      notion_enabled: notionEnabled,
-      notion_db_id: redact(NOTION_DB_ID),
-    },
-    routes: [
-      'GET    /health',
-      'GET    /dev/auth/ping',
-      'PATCH  /dev/samples/:sample_id/status',
-    ],
+    admin: { source: ADMIN_SOURCE, len: ADMIN.length, last4: ADMIN_LAST4 },
+    env: { port: String(PORT), notion_enabled: notionEnabled, notion_db_id: redact(NOTION_DB_ID) },
+    routes: ['GET /health','GET /dev/auth/ping','GET /dev/debug/echo-auth','PATCH /dev/samples/:sample_id/status']
   });
 });
+
+app.get('/dev/debug/echo-auth', (req, res) => {
+  res.json({
+    auth: req.headers.authorization || null,
+    host: req.headers.host,
+    xfh: req.headers['x-forwarded-host'] || null
+  });
+});
+
 
 // Protected ping to verify the Bearer token without touching Notion
 app.get('/dev/auth/ping', requireAdminBearer, (req, res) => {
