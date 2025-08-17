@@ -21,10 +21,21 @@ const NOTION_H = {
   'Notion-Version': NOTION_VERSION,
   'Content-Type': 'application/json'
 };
+// --- Admin token setup (accept both names) ---
+const ADMIN = (process.env.ADMIN_TOKEN || process.env.ADMIN_API_TOKEN || "").trim();
+const ADMIN_SOURCE = process.env.ADMIN_TOKEN
+  ? "ADMIN_TOKEN"
+  : (process.env.ADMIN_API_TOKEN ? "ADMIN_API_TOKEN" : "none");
 
-// ---------- Middleware ----------
-app.use(cors());
-app.use(express.json());
+// one-time boot log you can see in Render Logs (value not printed)
+console.log(`[boot] admin source=${ADMIN_SOURCE} len=${ADMIN.length}`);
+
+function requireAdminBearer(req, res, next) {
+  const h = req.headers.authorization || "";
+  const tok = h.startsWith("Bearer ") ? h.slice(7) : null;
+  if (!tok || tok !== ADMIN) return res.status(401).json({ ok: false, error: "unauthorized" });
+  next();
+}
 
 // ---------- Helpers ----------
 function requireAdminBearer(req, res, next) {
@@ -144,11 +155,6 @@ app.use((req, res, next) => {
 });
 // server.js (top)
 import 'dotenv/config'
-import express from 'express'
-import cors from 'cors'
-
-const app = express()
-app.enable('trust proxy')
 
 // (optional) canonical redirect middleware goes here
 
@@ -173,26 +179,32 @@ app.use(cors({
 // good to keep this after CORS and before routes
 app.use(express.json())
 
-// ...your routes (e.g., /health, /dev/samples/:sample_id/status) below
-
 // ---------- Routes ----------
 
-// Health
+// Unified health (replace BOTH of your current /health handlers with this one)
 app.get('/health', (req, res) => {
   res.json({
     ok: true,
     time: nowIso(),
+    admin: { source: ADMIN_SOURCE, len: ADMIN.length }, // shows which env var is used
     env: {
       port: String(PORT),
       notion_enabled: notionEnabled,
-      notion_db_id: redact(NOTION_DB_ID)
+      notion_db_id: redact(NOTION_DB_ID),
     },
     routes: [
       'GET    /health',
-      'PATCH  /dev/samples/:sample_id/status'
-    ]
+      'GET    /dev/auth/ping',
+      'PATCH  /dev/samples/:sample_id/status',
+    ],
   });
 });
+
+// Protected ping to verify the Bearer token without touching Notion
+app.get('/dev/auth/ping', requireAdminBearer, (req, res) => {
+  res.json({ ok: true, message: 'auth ok' });
+});
+
 
 // Admin-protected: update sample status by sample_id
 // Body: { "order_status": "sent", "sent_by": "DavidS" }
