@@ -157,6 +157,22 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Option A: redirect root to health
+app.get('/', (req, res) => res.redirect(302, '/health'));
+
+// Option B: small landing JSON
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    service: 'metskin-asst',
+    endpoints: [
+      'GET /health',
+      'GET /dev/auth/ping',
+      'PATCH /dev/samples/:sample_id/status'
+    ]
+  });
+});
+
 // Debug: show what Authorization header the server received
 app.get('/dev/debug/echo-auth', (req, res) => {
   res.json({ auth: req.headers.authorization || null });
