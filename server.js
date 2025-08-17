@@ -21,11 +21,6 @@ const NOTION_H = {
   'Notion-Version': NOTION_VERSION,
   'Content-Type': 'application/json'
 };
-// --- Admin token setup (accept both names) ---
-const ADMIN = (process.env.ADMIN_TOKEN || process.env.ADMIN_API_TOKEN || "").trim();
-const ADMIN_SOURCE = process.env.ADMIN_TOKEN
-  ? "ADMIN_TOKEN"
-  : (process.env.ADMIN_API_TOKEN ? "ADMIN_API_TOKEN" : "none");
 
 // one-time boot log you can see in Render Logs (value not printed)
 console.log(`[boot] admin source=${ADMIN_SOURCE} len=${ADMIN.length}`);
