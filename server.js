@@ -30,13 +30,6 @@ const ADMIN_SOURCE = process.env.ADMIN_TOKEN
 // one-time boot log you can see in Render Logs (value not printed)
 console.log(`[boot] admin source=${ADMIN_SOURCE} len=${ADMIN.length}`);
 
-function requireAdminBearer(req, res, next) {
-  const h = req.headers.authorization || "";
-  const tok = h.startsWith("Bearer ") ? h.slice(7) : null;
-  if (!tok || tok !== ADMIN) return res.status(401).json({ ok: false, error: "unauthorized" });
-  next();
-}
-
 // ---------- Helpers ----------
 function requireAdminBearer(req, res, next) {
   const header = req.headers.authorization || '';
