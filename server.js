@@ -125,6 +125,55 @@ async function notionUpdateBySampleId({ sample_id, order_status, sent_by }) {
 
   return { ok: true, page_id: page.id };
 }
+// before your routes
+app.enable('trust proxy'); // important on Render
+
+const CANONICAL_HOST = process.env.CANONICAL_HOST; // metamorphosis.assist.maximisedai.com
+app.use((req, res, next) => {
+  if (CANONICAL_HOST && req.headers.host && req.headers.host !== CANONICAL_HOST) {
+    const url = `https://${CANONICAL_HOST}${req.originalUrl}`;
+    return res.redirect(301, url);
+  }
+  next();
+});
+
+// (optional but good)
+app.use((req, res, next) => {
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+  next();
+});
+// server.js (top)
+import 'dotenv/config'
+import express from 'express'
+import cors from 'cors'
+
+const app = express()
+app.enable('trust proxy')
+
+// (optional) canonical redirect middleware goes here
+
+// ✅ CORS — place this BEFORE routes
+const ALLOW_ORIGINS = new Set([
+  'https://metamorphosis.assist.maximisedai.com',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000'
+])
+
+app.use(cors({
+  origin(origin, cb) {
+    // allow server-to-server, curl, Postman (no Origin header)
+    if (!origin) return cb(null, true)
+    cb(null, ALLOW_ORIGINS.has(origin))
+  },
+  credentials: true,
+  methods: ['GET','POST','PATCH','PUT','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization']
+}))
+
+// good to keep this after CORS and before routes
+app.use(express.json())
+
+// ...your routes (e.g., /health, /dev/samples/:sample_id/status) below
 
 // ---------- Routes ----------
 
