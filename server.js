@@ -86,24 +86,18 @@ async function notionCreateSampleLog({ threadId, runId, args = {}, downstream = 
   return { ok: true, page_id: data.id };
 }
 
-// ---------- Notion: find page by Sample_id & update status ----------
-/**
- * Looks up a page by "Sample_id" property and updates:
- *  - Order_status (select or rich_text, see below)
- *  - Date_sent (date)
- *  - Sent_by (rich_text)
- *
- * Adjust property types below to match your exact Notion schema.
- */
+// Looks up a page by Sample_id (TITLE) and updates Order_status (RICH_TEXT)
 async function notionUpdateBySampleId({ sample_id, order_status, sent_by }) {
   if (!notionEnabled) throw new Error('Notion not configured');
 
-  // 1) Query page by Sample_id (as rich_text). If your property type differs, change the filter.
+  // 1) Find page by Sample_id (title)
   const q = await fetch(`https://api.notion.com/v1/databases/${NOTION_DB_ID}/query`, {
     method: 'POST',
     headers: NOTION_H,
     body: JSON.stringify({
-      filter: { property: 'Sample_id', rich_text: { equals: sample_id } },
+      // Use "equals" for exact match; use "contains" if your title includes extra text.
+      // filter: { property: 'Sample_id', title: { contains: sample_id } },
+      filter: { property: 'Sample_id', title: { equals: sample_id } },
       page_size: 1
     })
   });
@@ -113,15 +107,12 @@ async function notionUpdateBySampleId({ sample_id, order_status, sent_by }) {
   const page = qj.results?.[0];
   if (!page) throw new Error(`sample_id "${sample_id}" not found`);
 
-  // 2) Build properties payload. If "Order_status" is not a select, switch to rich_text form.
+  // 2) Update properties
   const props = {
-    // If you use a select:
-    'Order_status': { select: { name: order_status } },
-    // If you use rich_text instead, comment the line above and uncomment the next line:
-    // 'Order_status': { rich_text: [{ text: { content: order_status } }] },
-
-    'Date_sent': { date: { start: nowIso() } },
-    'Sent_by': { rich_text: [{ text: { content: sent_by || '' } }] }
+    // Order_status is rich_text (NOT select)
+    'Order_status': { rich_text: [{ text: { content: String(order_status || '') } }] },
+    'Date_sent':    { date: { start: new Date().toISOString() } },
+    'Sent_by':      { rich_text: [{ text: { content: String(sent_by || '') } }] }
   };
 
   const u = await fetch(`https://api.notion.com/v1/pages/${page.id}`, {
