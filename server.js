@@ -57,18 +57,19 @@ const OAI_HEADERS = {
   "OpenAI-Beta": "assistants=v2", // REQUIRED for v2
 };
 
-// ---------- Notion (optional) ----------
+// ---------- Notion (samples DB) ----------
 const NOTION_TOKEN = process.env.NOTION_TOKEN || "";
-const NOTION_DB_ID = process.env.NOTION_DB_ID || "";
-const notionEnabled = Boolean(NOTION_TOKEN && NOTION_DB_ID);
+const NOTION_DB_ID = process.env.NOTION_DB_ID || ""; // fallback if samples DB not set
+const NOTION_SAMPLES_DB_ID = process.env.NOTION_SAMPLES_DB_ID || NOTION_DB_ID;
+const NOTION_SENT_BY = process.env.NOTION_SENT_BY || "Assistant";
 
-const NOTION_H = notionEnabled
-  ? {
-      Authorization: `Bearer ${NOTION_TOKEN}`,
-      "Notion-Version": "2022-06-28",
-      "Content-Type": "application/json",
-    }
-  : null;
+const notionEnabled = Boolean(NOTION_TOKEN && NOTION_SAMPLES_DB_ID);
+const NOTION_H = notionEnabled ? {
+  Authorization: `Bearer ${NOTION_TOKEN}`,
+  "Notion-Version": "2022-06-28",
+  "Content-Type": "application/json",
+} : null;
+
 
 async function notionCreateSampleLog({ threadId, runId, args, downstream, meta = {} }) {
   if (!notionEnabled) return null;
@@ -146,6 +147,101 @@ function getTenant(req) {
 
 // ---------- Helpers ----------
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function rtext(v) {
+  return v ? { rich_text: [{ type: "text", text: { content: String(v) } }] } : undefined;
+}
+function rtitle(v) {
+  return { title: [{ type: "text", text: { content: String(v || "Sample request") } }] };
+}
+function rselect(name) {
+  return name ? { select: { name: String(name) } } : undefined;
+}
+function rdateISO(d) {
+  return d ? { date: { start: d } } : undefined;
+}
+
+async function notionCreateSampleLog({ threadId, runId, args, downstream, meta = {} }) {
+  if (!notionEnabled) return null;
+
+  // Names
+  let firstname = args.firstname || args.first_name || "";
+  let lastname  = args.lastname  || args.last_name  || "";
+  if ((!firstname || !lastname) && typeof args.name === "string") {
+    const parts = args.name.trim().split(/\s+/);
+    firstname = firstname || parts[0] || "";
+    lastname  = lastname  || parts.slice(1).join(" ") || "";
+  }
+
+  // Address pieces (fallback parse "street, suburb, city, postcode")
+  let street   = args.address_street   || "";
+  let suburb   = args.address_suburb   || "";
+  let city     = args.address_city     || "";
+  let postcode = args.address_postcode || "";
+  if (!street && typeof args.address === "string") {
+    const a = args.address.split(",").map(s => s.trim());
+    street   = a[0] || street;
+    suburb   = a[1] || suburb;
+    city     = a[2] || city;
+    postcode = (a[3] || "").replace(/\D/g, "") || postcode;
+  }
+
+  const orderStatus = downstream?.ok
+    ? "sent"
+    : (downstream?.status ? "queued" : "error");
+
+  const person  = firstname || lastname || args.email || "anonymous";
+  const product = args.product || "Unknown";
+  const title   = `Sample — ${product} — ${person}`;
+
+  // EXACT property names you gave
+  const properties = {
+    Name: rtitle(title),
+    Firstname: rtext(firstname),
+    Lastname: rtext(lastname),
+    address_street: rtext(street),
+    address_suburb: rtext(suburb),
+    address_city: rtext(city),
+    address_postcode: rtext(postcode),
+    Notes: rtext(args.notes || ""),
+    Consent: rtext("Yes"), // stored as text per your schema
+    Order_status: rselect(orderStatus) || rtext(orderStatus), // works with Select or plain text
+    Date_sent: downstream?.ok ? rdateISO(new Date().toISOString().slice(0,10)) : rtext("n/a"),
+    Run: rtext(runId),
+    Campaign: rtext(meta.campaign || ""),
+    Sent_by: rtext(meta.sent_by || NOTION_SENT_BY),
+    Thread: rtext(threadId),
+  };
+
+  Object.keys(properties).forEach(k => properties[k] === undefined && delete properties[k]);
+
+  const blocks = [
+    { object:"block", type:"paragraph",
+      paragraph:{ rich_text:[{ type:"text", text:{ content:"Submitted via assistant tool: submit_sample_request" } }] } },
+    { object:"block", type:"paragraph",
+      paragraph:{ rich_text:[{ type:"text", text:{ content:`Args: ${JSON.stringify(args)}` } }] } },
+    { object:"block", type:"paragraph",
+      paragraph:{ rich_text:[{ type:"text", text:{ content:`Downstream: ${JSON.stringify(downstream)}` } }] } },
+  ];
+
+  const r = await fetch("https://api.notion.com/v1/pages", {
+    method: "POST",
+    headers: NOTION_H,
+    body: JSON.stringify({
+      parent: { database_id: NOTION_SAMPLES_DB_ID },
+      properties,
+      children: blocks
+    }),
+  });
+
+  if (!r.ok) {
+    console.warn("[Notion] create failed:", r.status, await r.text().catch(()=>"" ));
+    return null;
+  }
+  const j = await r.json().catch(() => ({}));
+  return j?.id || null;
+}
+
 
 async function waitForRun(threadId, runId) {
   const deadline = Date.now() + 60_000; // 60s budget
