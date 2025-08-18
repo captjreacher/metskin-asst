@@ -44,7 +44,7 @@ app.get("/", (_req, res) =>
 );
 
 // ---------- Assistant endpoint (Responses API via assistant_id) ----------
-  app.post("/assistant/ask", async (req, res) => {
+app.post("/assistant/ask", async (req, res) => {
   try {
     const { message, model } = req.body ?? {};
     if (!message || typeof message !== "string") {
@@ -95,7 +95,7 @@ app.get("/", (_req, res) =>
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }
-  });
+});
 
 // ---------- Start chat (creates conversation id) ----------
 app.get("/start-chat", (_req, res) => {
@@ -206,6 +206,7 @@ app.post("/chat", async (req, res) => {
     res.status(500).json({ ok:false, error: err.message });
   }
 });
+
 // --- Admin: trigger Notion → Vector Store sync on demand ---
 // Auth: Authorization: Bearer <ADMIN_API_TOKEN or JWT_SECRET>
 app.post("/admin/sync-knowledge", async (req, res) => {
