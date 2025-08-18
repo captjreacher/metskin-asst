@@ -62,6 +62,7 @@ app.get("/", (_req, res) =>
       headers: {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
+        "OpenAI-Beta": "assistants=v2",
       },
       body: JSON.stringify({
         assistant_id: ASST_DEFAULT,
@@ -96,6 +97,7 @@ app.get("/start-chat", async (_req, res) => {
       headers: {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
+        "OpenAI-Beta": "assistants=v2",
       },
       body: "{}",
     });
@@ -135,6 +137,7 @@ app.post("/send", async (req, res) => {
       headers: {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
+        "OpenAI-Beta": "assistants=v2",
       },
       body: JSON.stringify({
         thread_id,
