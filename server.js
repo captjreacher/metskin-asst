@@ -1,4 +1,4 @@
-// server.js
+// server.js  (Option A: Responses API + File Search w/ vector store)
 import express from "express";
 import dotenv from "dotenv";
 dotenv.config();
@@ -80,17 +80,16 @@ const page = /* html */ `<!doctype html>
 
 // ---------- Routes (order matters) ----------
 
-// Health (support both /health and /healthz so hosting checks never touch "/")
+// Health (support both /health and /healthz)
 const healthPayload = {
   ok: true,
   env: {
-    notion_samples_db_id: process.env.NOTION_SAMPLES_DB_ID || null,
-    title_prop: process.env.NOTION_TITLE_PROP || "Name",
+    vector_store: process.env.VS_DEFAULT || null,
   },
   routes: [
     "GET  /            (assistant UI)",
     "GET  /assistant   (assistant UI)",
-    "POST /assistant/ask",
+    "POST /assistant/ask (Responses API + File Search)",
     "GET  /health",
     "GET  /healthz"
   ]
@@ -102,7 +101,7 @@ app.get("/healthz", (_req, res) => res.json(healthPayload));
 app.get("/",          (_req, res) => res.type("html").send(page));
 app.get("/assistant", (_req, res) => res.type("html").send(page));
 
-// Assistant API
+// ---------- Assistant API (Responses + File Search) ----------
 app.post("/assistant/ask", async (req, res) => {
   try {
     const { message } = req.body ?? {};
@@ -112,20 +111,22 @@ app.post("/assistant/ask", async (req, res) => {
     if (!process.env.OPENAI_API_KEY) {
       return res.status(500).json({ ok:false, error:"OPENAI_API_KEY missing" });
     }
+    if (!process.env.VS_DEFAULT) {
+      return res.status(500).json({ ok:false, error:"VS_DEFAULT missing (vector store id)" });
+    }
 
-    // Use global fetch (Node 18+). Adjust model as you prefer.
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    // Responses API + file_search against your vector store
+    const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "You are a helpful assistant for Metamorphosis." },
-          { role: "user", content: message }
-        ]
+        model: "gpt-4.1-mini",
+        input: [{ role: "user", content: message }],
+        tools: [{ type: "file_search" }],
+        tool_resources: { file_search: { vector_store_ids: [process.env.VS_DEFAULT] } }
       })
     });
 
@@ -133,7 +134,14 @@ app.post("/assistant/ask", async (req, res) => {
     if (!r.ok) {
       return res.status(r.status).json({ ok:false, error: data?.error?.message || "OpenAI error" });
     }
-    res.json({ ok:true, answer: data?.choices?.[0]?.message?.content ?? "" });
+
+    // Responses API returns text in output_text (or in output[])
+    const answer =
+      data.output_text ??
+      (Array.isArray(data.output) && data.output[0]?.content?.[0]?.text) ??
+      "";
+
+    res.json({ ok:true, answer });
   } catch (err) {
     res.status(500).json({ ok:false, error: err.message });
   }
