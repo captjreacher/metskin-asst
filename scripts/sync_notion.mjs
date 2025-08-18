@@ -12,6 +12,8 @@ const {
   NOTION_DB_ID,
   OPENAI_API_KEY,
   VECTOR_STORE_ID, // required: target vector store
+  ASST_METAMORPHOSIS,
+  ASST_DEFAULT,
 } = process.env;
 
 function requireEnv(name, val) {
@@ -21,6 +23,8 @@ requireEnv('NOTION_TOKEN', NOTION_TOKEN);
 requireEnv('NOTION_DB_ID', NOTION_DB_ID);
 requireEnv('OPENAI_API_KEY', OPENAI_API_KEY);
 requireEnv('VECTOR_STORE_ID', VECTOR_STORE_ID);
+
+const ASSISTANT_ID = ASST_METAMORPHOSIS || ASST_DEFAULT;
 
 // ===== clients =====
 const notion = new Notion({ auth: NOTION_TOKEN });
@@ -143,6 +147,16 @@ async function updateNotionFileId(pageId, fileId) {
       failed++;
       console.error(`[err] ${filename}: ${e?.message || e}`);
     }
+  }
+
+  if (ASSISTANT_ID) {
+    await openai.beta.assistants.update(ASSISTANT_ID, {
+      tools: [{ type: 'file_search' }],
+      tool_resources: { file_search: { vector_store_ids: [VECTOR_STORE_ID] } },
+    });
+    console.log(`🔗 Assistant updated: ${ASSISTANT_ID}`);
+  } else {
+    console.warn('⚠️ No ASST_* id; skipping assistant update.');
   }
 
   await saveState({ lastSyncISO: new Date().toISOString() });

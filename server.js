@@ -151,25 +151,6 @@ app.post("/assistant/ask", async (req, res) => {
   }
 });
 
-
-    const data = await r.json();
-    if (!r.ok) {
-      const msg = (data && (data.error?.message || data.message)) || "OpenAI error";
-      return res.status(r.status).json({ ok:false, error: msg });
-    }
-
-    // Responses API: prefer 'output_text'; fallback to first output item.
-    const answer =
-      data.output_text ??
-      (Array.isArray(data.output) && data.output[0]?.content?.[0]?.text) ??
-      "";
-
-    return res.json({ ok:true, answer });
-  } catch (err) {
-    return res.status(500).json({ ok:false, error: err.message });
-  }
-});
-
 // ---------- Start ----------
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Assistant ready on http://localhost:${PORT}`));
