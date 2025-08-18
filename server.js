@@ -1,261 +1,146 @@
 // server.js
-// Node 18+ (ESM). package.json must include: { "type": "module" }
+import express from "express";
+import fetch from "node-fetch";           // If on Node 18+ you can use global fetch and remove this
+import dotenv from "dotenv";
+dotenv.config();
 
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import crypto from 'node:crypto';
-
-// ------------------------- App & basics -------------------------
-const app  = express();
-const PORT = process.env.PORT || 3001;
-
-app.enable('trust proxy');
+const app = express();
 app.use(express.json());
 
-// Optional canonical redirect (Render-friendly)
-const CANONICAL_HOST = (process.env.CANONICAL_HOST || '').trim();
-app.use((req, res, next) => {
-  if (CANONICAL_HOST && req.headers.host && req.headers.host !== CANONICAL_HOST) {
-    return res.redirect(301, `https://${CANONICAL_HOST}${req.originalUrl}`);
-  }
-  next();
-});
+// ---------- Simple Assistant UI (served at "/") ----------
+const assistantPage = /* html */ `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Metamorphosis Assistant</title>
+  <style>
+    body { font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background:#0b0b0c; color:#e9e9ea; }
+    header { padding: 16px 20px; background:#131316; border-bottom:1px solid #232327; }
+    main { max-width: 800px; margin: 24px auto; padding: 0 16px; }
+    #log { white-space: pre-wrap; background:#111; border:1px solid #202024; border-radius:12px; padding:16px; min-height:180px; }
+    form { display:flex; gap:8px; margin-top:16px; }
+    input,button { font:inherit; }
+    input { flex:1; padding:12px 14px; border-radius:10px; border:1px solid #303036; background:#0f0f11; color:#e9e9ea; }
+    button { padding:12px 16px; border:1px solid #3a3a42; border-radius:10px; background:#1f37ff; color:#fff; cursor:pointer; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .sys { color:#8b8b94; }
+    .err { color:#ff8a8a; }
+  </style>
+</head>
+<body>
+  <header><strong>Metamorphosis Assistant</strong></header>
+  <main>
+    <div id="log"><span class="sys">Assistant ready. Ask me anything.</span></div>
+    <form id="f">
+      <input id="q" placeholder="Type your question…" autocomplete="off" />
+      <button id="send">Ask</button>
+    </form>
+  </main>
+  <script>
+    const log = document.getElementById('log');
+    const f = document.getElementById('f');
+    const q = document.getElementById('q');
+    const btn = document.getElementById('send');
 
-// Simple security hardening
-app.use((_, res, next) => {
-  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
-  next();
-});
+    function add(role, text, cls='') {
+      const who = role === 'user' ? 'You' : 'Assistant';
+      const line = document.createElement('div');
+      if (cls) line.className = cls;
+      line.textContent = who + ': ' + text;
+      log.appendChild(document.createElement('br'));
+      log.appendChild(line);
+      log.scrollTop = log.scrollHeight;
+    }
 
-// CORS (adjust as needed)
-const ALLOW_ORIGINS = new Set([
-  'https://metamorphosis.assist.maximisedai.com',
-  'http://localhost:3000',
-  'http://127.0.0.1:3000',
-]);
-app.use(cors({
-  origin(origin, cb) {
-    if (!origin) return cb(null, true); // curl/Postman/server-to-server
-    cb(null, ALLOW_ORIGINS.has(origin));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const message = q.value.trim();
+      if (!message) return;
+      add('user', message);
+      q.value = '';
+      btn.disabled = true;
 
-// ------------------------- Auth -------------------------
-const ADMIN = (process.env.ADMIN_TOKEN || process.env.ADMIN_API_TOKEN || '').trim();
-const ADMIN_SOURCE = process.env.ADMIN_TOKEN
-  ? 'ADMIN_TOKEN'
-  : (process.env.ADMIN_API_TOKEN ? 'ADMIN_API_TOKEN' : 'none');
+      try {
+        const r = await fetch('/assistant/ask', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message })
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.error || 'Request failed');
+        add('assistant', j.answer ?? '(no answer)');
+      } catch (err) {
+        add('assistant', err.message, 'err');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>`;
 
-function requireAdminBearer(req, res, next) {
-  const h = req.headers.authorization || '';
-  const tok = h.startsWith('Bearer ') ? h.slice(7) : null;
-  if (!tok || tok !== ADMIN) {
-    return res.status(401).json({ ok: false, error: 'unauthorized' });
-  }
-  next();
-}
+// ---------- Routes ----------
 
-// Assistant public switch (default: public like before)
-const ASSIST_PUBLIC = (process.env.ASSIST_PUBLIC ?? 'true').toLowerCase() !== 'false';
-
-// ------------------------- Notion config -------------------------
-const NOTION_VERSION = '2022-06-28';
-
-const NOTION_TOKEN_DEFAULT = (process.env.NOTION_TOKEN || '').trim(); // optional, for any default DB
-const NOTION_DB_ID_DEFAULT = (process.env.NOTION_DB_ID || '').trim();  // optional, if you keep it
-
-// Samples DB (used by PATCH)
-const NOTION_TOKEN_SAMPLES = (process.env.NOTION_TOKEN_SAMPLES || NOTION_TOKEN_DEFAULT || '').trim();
-const NOTION_SAMPLES_DB_ID = (process.env.NOTION_SAMPLES_DB_ID || '').trim();
-
-// Title (Name) property used to look up the row by page title
-const NOTION_TITLE_PROP = (process.env.NOTION_TITLE_PROP || 'Name').trim();
-
-const notionEnabled = Boolean(NOTION_TOKEN_SAMPLES && NOTION_SAMPLES_DB_ID);
-
-// Generic Notion fetch with per-call token
-async function notionFetch(path, { token = NOTION_TOKEN_DEFAULT, method = 'GET', body } = {}) {
-  const resp = await fetch(`https://api.notion.com/v1${path}`, {
-    method,
-    headers: {
-      'Authorization'  : `Bearer ${token}`,
-      'Notion-Version' : NOTION_VERSION,
-      'Content-Type'   : 'application/json',
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const json = await resp.json().catch(() => ({}));
-  return { resp, json };
-}
-
-// ------------------------- Routes -------------------------
-
-// Root -> health (keeps the single entry point stable)
-app.get('/', (_req, res) => res.redirect(302, '/health'));
-
-// Health: shows config + available endpoints
-app.get('/health', (_req, res) => {
+// Health: shows what’s enabled
+app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    admin: { source: ADMIN_SOURCE, len: ADMIN.length },
     env: {
-      notion_samples_db_id: NOTION_SAMPLES_DB_ID ? NOTION_SAMPLES_DB_ID.slice(0, 8) : null,
-      tokens: {
-        samples_len: NOTION_TOKEN_SAMPLES.length,
-        default_len: NOTION_TOKEN_DEFAULT.length,
-        same: (NOTION_TOKEN_SAMPLES && NOTION_TOKEN_DEFAULT)
-          ? NOTION_TOKEN_SAMPLES === NOTION_TOKEN_DEFAULT
-          : null,
-      },
-      title_prop: NOTION_TITLE_PROP,
-      assist_public: ASSIST_PUBLIC,
+      notion_samples_db_id: process.env.NOTION_SAMPLES_DB_ID || null,
+      title_prop: process.env.NOTION_TITLE_PROP || "Name",
     },
     routes: [
-      'GET   /health',
-      'GET   /dev/auth/ping',
-      'GET   /dev/debug/echo-auth',
-      'PATCH /dev/samples/:sample_id/status',
-      'POST  /assistant/ask',
-      'POST  /dev/assistant/ask',
-    ],
+      "GET  /            (assistant UI)",
+      "GET  /assistant   (assistant UI)",
+      "POST /assistant/ask",
+      "GET  /health"
+    ]
   });
 });
 
-// Debug: echo Authorization header the server received
-app.get('/dev/debug/echo-auth', (req, res) => {
-  res.json({ auth: req.headers.authorization || null });
-});
+// Serve the assistant UI on "/" and "/assistant"
+app.get("/", (_req, res) => res.type("html").send(assistantPage));
+app.get("/assistant", (_req, res) => res.type("html").send(assistantPage));
 
-// Protected ping
-app.get('/dev/auth/ping', requireAdminBearer, (_req, res) => {
-  res.json({ ok: true, message: 'auth ok' });
-});
-
-// PATCH: update a Samples row (lookup by page title == sample_id)
-app.patch('/dev/samples/:sample_id/status', requireAdminBearer, async (req, res) => {
-  if (!notionEnabled) {
-    return res.status(500).json({
-      ok: false,
-      error: 'NOTION_SAMPLES_NOT_CONFIGURED',
-      detail: 'Set NOTION_TOKEN_SAMPLES and NOTION_SAMPLES_DB_ID',
-    });
-  }
-
-  try {
-    const { sample_id } = req.params;
-    const { order_status, sent_by } = req.body || {};
-
-    if (!sample_id)    return res.status(400).json({ ok: false, error: 'sample_id is required' });
-    if (!order_status) return res.status(400).json({ ok: false, error: 'order_status is required' });
-
-    // 1) Find page by title (Name)
-    const queryBody = {
-      filter: { property: NOTION_TITLE_PROP, title: { equals: String(sample_id) } },
-      page_size: 2,
-    };
-    const { resp: qResp, json: qJson } = await notionFetch(
-      `/databases/${NOTION_SAMPLES_DB_ID}/query`,
-      { token: NOTION_TOKEN_SAMPLES, method: 'POST', body: queryBody },
-    );
-
-    if (!qResp.ok) {
-      return res.status(qResp.status).json({ ok: false, error: 'NOTION_QUERY_FAILED', detail: qJson });
-    }
-    if (!qJson.results?.length) {
-      return res.status(404).json({ ok: false, error: 'SAMPLE_NOT_FOUND', sample_id });
-    }
-
-    const pageId = qJson.results[0].id;
-
-    // 2) Update properties
-    const updateBody = {
-      properties: {
-        order_status: { rich_text: [{ text: { content: String(order_status ?? '') } }] },
-        sent_by:      { rich_text: [{ text: { content: String(sent_by ?? '') } }] },
-        date_sent:    { date: { start: new Date().toISOString().slice(0, 10) } },
-      },
-    };
-
-    const { resp: uResp, json: uJson } = await notionFetch(
-      `/pages/${pageId}`,
-      { token: NOTION_TOKEN_SAMPLES, method: 'PATCH', body: updateBody },
-    );
-
-    return res.status(uResp.status).json({ ok: uResp.ok, page_id: pageId, detail: uJson });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: 'SERVER_ERROR', detail: String(err) });
-  }
-});
-
-// ------------------------- Assistant (OpenAI) -------------------------
-// We expose BOTH routes so the old frontend and your dev tests work.
-// - /assistant/ask           (public by default; set ASSIST_PUBLIC=false to require admin)
-// - /dev/assistant/ask       (always requires admin)
-
-async function handleAssistant(req, res) {
+// Assistant API: POST { message } -> answer
+app.post("/assistant/ask", async (req, res) => {
   try {
     const { message } = req.body || {};
-    if (!message || typeof message !== 'string') {
-      return res.status(400).json({ ok: false, error: 'message is required' });
+    if (!message || typeof message !== "string") {
+      return res.status(400).json({ ok: false, error: "Field 'message' is required" });
     }
 
-    const apiKey = (process.env.OPENAI_API_KEY || '').trim();
-    if (!apiKey) return res.status(500).json({ ok: false, error: 'missing_OPENAI_API_KEY' });
-
-    const r = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
+    // Call OpenAI chat completions (uses your .env OPENAI_API_KEY)
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
       headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type' : 'application/json',
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: "gpt-4o-mini",  // or any available model
         messages: [
-          { role: 'system', content: 'You are a helpful assistant for Metamorphosis.' },
-          { role: 'user', content: String(message) },
-        ],
-      }),
+          { role: "system", content: "You are a helpful assistant for Metamorphosis." },
+          { role: "user", content: message }
+        ]
+      })
     });
 
-    const data = await r.json().catch(() => ({}));
+    const data = await r.json();
     if (!r.ok) {
-      return res.status(r.status).json({ ok: false, error: 'openai_error', detail: data });
+      return res.status(r.status).json({ ok: false, error: data.error?.message || "OpenAI error" });
     }
 
-    const reply = data?.choices?.[0]?.message?.content ?? '';
-    return res.json({ ok: true, reply, raw: data });
+    const answer = data?.choices?.[0]?.message?.content ?? "";
+    res.json({ ok: true, answer });
   } catch (err) {
-    console.error('assistant error:', err);
-    return res.status(500).json({ ok: false, error: 'assistant_failed' });
+    res.status(500).json({ ok: false, error: err.message });
   }
-}
-
-// Public assistant (unless ASSIST_PUBLIC=false)
-app.post('/assistant/ask', (req, res, next) => {
-  if (!ASSIST_PUBLIC) return requireAdminBearer(req, res, () => handleAssistant(req, res));
-  return handleAssistant(req, res, next);
 });
 
-// Dev assistant (always admin-protected)
-app.post('/dev/assistant/ask', requireAdminBearer, handleAssistant);
-
-// ------------------------- Utilities -------------------------
-app.post('/dev/make-token', (_req, res) => {
-  const token = 'dev_' + crypto.randomBytes(16).toString('hex');
-  res.json({ ok: true, token });
-});
-
-// 404
-app.use((req, res) => res.status(404).json({ ok: false, error: 'not_found', path: req.path }));
-
-// ------------------------- Start -------------------------
+// ---------- Start ----------
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`API listening on ${PORT}`);
-  if (!notionEnabled) {
-    console.log('[warn] Notion Samples disabled – set NOTION_TOKEN_SAMPLES and NOTION_SAMPLES_DB_ID');
-  }
+  console.log(`Assistant ready on http://localhost:${PORT}`);
 });
