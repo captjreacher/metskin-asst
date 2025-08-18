@@ -150,6 +150,33 @@ app.post("/assistant/ask", async (req, res) => {
     return res.status(500).json({ ok:false, error: err.message });
   }
 });
+// Simple Chat Completions test route (raw fetch)
+app.post("/chat", async (req, res) => {
+  try {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "gpt-4-turbo",
+        messages: [{ role: "user", content: "Hello" }]
+      })
+    });
+
+    const data = await r.json();
+    if (!r.ok) {
+      return res.status(r.status).json({ ok: false, error: data?.error?.message || "OpenAI error" });
+    }
+
+    // Return the first assistant message
+    const answer = data.choices?.[0]?.message?.content ?? "";
+    res.json({ ok: true, answer });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 // ---------- Start ----------
 const PORT = process.env.PORT || 10000;
