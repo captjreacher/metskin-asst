@@ -101,7 +101,7 @@ app.get("/healthz", (_req, res) => res.json(healthPayload));
 app.get("/",          (_req, res) => res.type("html").send(page));
 app.get("/assistant", (_req, res) => res.type("html").send(page));
 
-// ---------- Assistant API (Responses + File Search) ----------
+// Assistant API: POST { message } -> answer (Responses API + file_search)
 app.post("/assistant/ask", async (req, res) => {
   try {
     const { message } = req.body ?? {};
@@ -111,9 +111,40 @@ app.post("/assistant/ask", async (req, res) => {
     if (!process.env.OPENAI_API_KEY) {
       return res.status(500).json({ ok:false, error:"OPENAI_API_KEY missing" });
     }
-    if (!process.env.VS_DEFAULT) {
-      return res.status(500).json({ ok:false, error:"VS_DEFAULT missing (vector store id)" });
+    if (!process.env.ASST_DEFAULT) {
+      return res.status(500).json({ ok:false, error:"ASST_DEFAULT missing (assistant id with your vector store attached)" });
     }
+
+    // Use Responses API and point 'model' at your Assistant ID
+    const r = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        // IMPORTANT: use the Assistant ID here so its attached vector store is used
+        model: process.env.ASST_DEFAULT,
+        input: [{ role: "user", content: message }],
+        tools: [{ type: "file_search" }] // no tool_resources in Responses API
+      })
+    });
+
+    const data = await r.json();
+    if (!r.ok) {
+      return res.status(r.status).json({ ok:false, error: data?.error?.message || "OpenAI error" });
+    }
+
+    const answer =
+      data.output_text ??
+      (Array.isArray(data.output) && data.output[0]?.content?.[0]?.text) ??
+      "";
+
+    res.json({ ok:true, answer });
+  } catch (err) {
+    res.status(500).json({ ok:false, error: err.message });
+  }
+});
 
     // Responses API + file_search against your vector store
     const r = await fetch("https://api.openai.com/v1/responses", {
