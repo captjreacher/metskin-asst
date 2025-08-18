@@ -1,4 +1,5 @@
 // server.js — API server for Metamorphosis Assistant
+import { spawn } from "node:child_process";
 import express from "express";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
@@ -193,6 +194,48 @@ app.post("/chat", async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok:false, error: err.message });
   }
+});
+// --- Admin: trigger Notion → Vector Store sync on demand ---
+// Auth: Authorization: Bearer <ADMIN_API_TOKEN or JWT_SECRET>
+app.post("/admin/sync-knowledge", async (req, res) => {
+  const header = req.headers["authorization"] || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+
+  const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;   // if present, preferred
+  const JWT_SECRET      = process.env.JWT_SECRET;        // fallback
+  const expected = ADMIN_API_TOKEN || JWT_SECRET;
+
+  if (!expected) {
+    return res.status(503).json({ ok: false, error: "Sync admin route disabled (no ADMIN_API_TOKEN or JWT_SECRET set)" });
+  }
+  if (!token || token !== expected) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
+  }
+
+  // spawn a one-shot sync: node scripts/sync_knowledge_from_notion_files.mjs
+  const child = spawn(process.execPath, ["scripts/sync_knowledge_from_notion_files.mjs"], {
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  let out = "";
+  let err = "";
+  child.stdout.on("data", (d) => { out += d.toString(); });
+  child.stderr.on("data", (d) => { err += d.toString(); });
+
+  child.on("error", (e) => {
+    return res.status(500).json({ ok: false, error: `spawn error: ${e.message}` });
+  });
+
+  child.on("close", (code) => {
+    const ok = code === 0;
+    return res.status(ok ? 200 : 500).json({
+      ok,
+      code,
+      stdout: out.trim(),
+      stderr: err.trim()
+    });
+  });
 });
 
 // ---------- Start ----------
