@@ -1,0 +1,15 @@
+{
+  "schema_version": "v1",
+  "name_for_model": "metamorphosis_assistant",
+  "name_for_human": "Metamorphosis Assistant",
+  "description_for_model": "Interact with the Metamorphosis Assistant for skincare guidance and sample information.",
+  "description_for_human": "Chat with the Metamorphosis Assistant to receive skincare recommendations and learn about free samples.",
+  "auth": { "type": "none" },
+  "api": {
+    "type": "openapi",
+    "url": "/openapi.yaml"
+  },
+  "logo_url": "https://via.placeholder.com/256",
+  "contact_email": "support@example.com",
+  "legal_info_url": "https://example.com/legal"
+}
