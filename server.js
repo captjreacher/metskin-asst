@@ -1,13 +1,16 @@
 /**
- * Metamorphosis Assistant — API Server (full rewrite)
- * ---------------------------------------------------
- * - Correct /v1/responses usage (content blocks; no 'conversation')
- * - Threading via { store: true, previous_response_id }
- * - 'model' is required → uses DEFAULT_MODEL unless caller overrides
- * - Accepts JSON or raw text for /assistant/ask and /send
- * - Returns JSON on parse errors (no HTML "Bad Request")
- * - Deep logging via DEBUG_LOG_REQUESTS, DEBUG_LOG_BODIES, DEBUG_OPENAI
- * - Health endpoints, static UI, dev token, admin sync
+ * Metamorphosis Assistant — API Server (stabilized + flag for assistant_id)
+ * -------------------------------------------------------------------------
+ * Default: plain Responses mode (no assistant_id) => works everywhere.
+ * Optional: set USE_ASSISTANT_ID=true to use Assistants v2 threading:
+ *   - Sends "OpenAI-Beta: assistants=v2"
+ *   - Adds assistant_id, store:true, previous_response_id
+ *   - Requires model in both modes
+ * Robustness:
+ *   - Accepts JSON or raw text bodies for /assistant/ask and /send
+ *   - Always uses content blocks
+ *   - Returns JSON on parse errors (no HTML)
+ *   - Loud debug logs (toggle with env)
  */
 
 import express from "express";
@@ -24,8 +27,7 @@ dotenv.config();
 /* -------------------- App / Debug -------------------- */
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-
-const on = (v) => /^(1|true|yes|on)$/i.test(String(v || ""));
+const on = v => /^(1|true|yes|on)$/i.test(String(v || ""));
 const DBG_REQ = on(process.env.DEBUG_LOG_REQUESTS);
 const DBG_BOD = on(process.env.DEBUG_LOG_BODIES);
 const DBG_OA  = on(process.env.DEBUG_OPENAI);
@@ -37,45 +39,30 @@ function requireEnv(name) {
   return v;
 }
 
-const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
-// Assistant configuration
-// ASST_DEFAULT: OpenAI assistant ID (required)
-// ASST_INSTRUCTIONS: optional override/extra instructions
-const ASST_ID = requireEnv("ASST_DEFAULT");
-const ASST_INSTRUCTIONS = process.env.ASST_INSTRUCTIONS || "";
-const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const OPENAI_API_KEY  = requireEnv("OPENAI_API_KEY");
+const DEFAULT_MODEL   = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const USE_ASSISTANT   = on(process.env.USE_ASSISTANT_ID); // ← default false
+const ASST_DEFAULT    = USE_ASSISTANT ? requireEnv("ASST_DEFAULT") : process.env.ASST_DEFAULT;
 
 /* -------------------- Parsers & Error Handling -------------------- */
 app.use(express.json({ limit: "1mb" }));
 
-// Return JSON (not HTML) when JSON parsing fails
 app.use((err, _req, res, next) => {
   if (err && err.type === "entity.parse.failed") {
-    return res.status(400).json({
-      ok: false,
-      error: "Invalid JSON payload",
-      details: String(err.message || ""),
-    });
+    return res.status(400).json({ ok: false, error: "Invalid JSON payload", details: String(err.message || "") });
   }
   next(err);
 });
 
-// Also accept raw text for these routes (helps with curl/PowerShell quirks)
 app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
 
-// Static assets (UI)
 app.use(express.static(path.join(__dirname, "public")));
 
-// Request logger
 if (DBG_REQ) {
-  app.use((req, _res, next) => {
-    console.log(`[REQ] ${req.method} ${req.url}`);
-    next();
-  });
+  app.use((req, _res, next) => { console.log(`[REQ] ${req.method} ${req.url}`); next(); });
 }
 
-// Body logger (sanitized / string)
-function redact(obj) { try { return JSON.parse(JSON.stringify(obj || {})); } catch { return {}; } }
+function redact(o){ try { return JSON.parse(JSON.stringify(o||{})); } catch { return {}; } }
 if (DBG_BOD) {
   app.use((req, _res, next) => {
     if (req.path === "/assistant/ask" || req.path === "/send") {
@@ -84,27 +71,23 @@ if (DBG_BOD) {
     next();
   });
 }
-function safeParseJson(s) { try { return JSON.parse(s); } catch { return {}; } }
-function bodyObj(req) { return typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}); }
+function safeParseJson(s){ try { return JSON.parse(s); } catch { return {}; } }
+function bodyObj(req){ return typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}); }
 
 /* -------------------- OpenAI /v1/responses -------------------- */
 const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
 const OA_HEADERS = {
   Authorization: `Bearer ${OPENAI_API_KEY}`,
   "Content-Type": "application/json",
-  // Enable assistant_id and other responses features
-  "OpenAI-Beta": "assistants=v2, responses=v1",
+  ...(USE_ASSISTANT ? { "OpenAI-Beta": "assistants=v2" } : {}), // only when using assistant_id
 };
 
 function blocks(text) {
   return [{ role: "user", content: [{ type: "input_text", text: String(text ?? "") }] }];
 }
 function extractText(data) {
-  return (
-    data?.output_text ??
-    (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ??
-    ""
-  );
+  return data?.output_text ??
+    (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ?? "";
 }
 function headersForLog(h) {
   const mask = h.Authorization ? `Bearer ${h.Authorization.slice(7, 11)}…` : "(missing)";
@@ -113,13 +96,7 @@ function headersForLog(h) {
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  const req = {
-    method: "POST",
-    headers: OA_HEADERS,
-    body: JSON.stringify(body),
-    signal: controller.signal,
-  };
+  const req = { method: "POST", headers: OA_HEADERS, body: JSON.stringify(body), signal: controller.signal };
 
   if (DBG_OA) {
     console.log("[OA HEADERS]", headersForLog(OA_HEADERS));
@@ -127,29 +104,19 @@ async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   }
 
   let resp, raw;
-  try {
-    resp = await fetch(RESPONSES_URL, req);
-    raw = await resp.text();
-  } finally {
-    clearTimeout(timer);
-  }
-
+  try { resp = await fetch(RESPONSES_URL, req); raw = await resp.text(); } finally { clearTimeout(timer); }
   if (DBG_OA) console.log("[OA⇠] HTTP", resp?.status, "\n" + raw);
 
-  let json;
-  try { json = JSON.parse(raw); } catch { json = { error: { message: raw || "Non-JSON response from OpenAI" } }; }
-
+  let json; try { json = JSON.parse(raw); } catch { json = { error: { message: raw || "Non-JSON response" } }; }
   if (!resp.ok) {
     const err = new Error(json?.error?.message || json?.message || `OpenAI error (HTTP ${resp.status})`);
-    err.status = resp.status;
-    err.data = json;
-    throw err;
+    err.status = resp.status; err.data = json; throw err;
   }
   return json;
 }
 
-/* -------------------- Thread state (in-memory) -------------------- */
-// Map: your UI's thread_id (UUID) -> last OpenAI response.id
+/* -------------------- Thread State -------------------- */
+// Only used when USE_ASSISTANT_ID=true (Responses threading)
 const lastResponseIdByThread = new Map();
 
 /* -------------------- Routes -------------------- */
@@ -157,61 +124,45 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     routes: [
-      "GET  /",
-      "GET  /health",
-      "GET  /healthz",
-      "GET  /start-chat",
-      "POST /assistant/ask",
-      "POST /send",
-      "POST /dev/make-token",
-      "POST /chat",
-      "POST /admin/sync-knowledge",
+      "GET  /", "GET  /health", "GET  /healthz", "GET  /start-chat",
+      "POST /assistant/ask", "POST /send", "POST /dev/make-token",
+      "POST /chat", "POST /admin/sync-knowledge",
     ],
     env: {
       OPENAI_API_KEY: "set",
-      ASST_DEFAULT: "set",
       OPENAI_MODEL: DEFAULT_MODEL,
+      USE_ASSISTANT_ID: USE_ASSISTANT,
+      ASST_DEFAULT: USE_ASSISTANT ? (ASST_DEFAULT ? "set" : "missing") : "(not used)",
       DEBUG: { DEBUG_LOG_REQUESTS: DBG_REQ, DEBUG_LOG_BODIES: DBG_BOD, DEBUG_OPENAI: DBG_OA },
     },
   });
 });
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
-app.get("/", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
+app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
-app.get("/start-chat", (_req, res) => {
-  const thread_id = crypto.randomUUID();
-  res.json({ ok: true, thread_id });
-});
+app.get("/start-chat", (_req, res) => res.json({ ok: true, thread_id: crypto.randomUUID() }));
 
 /* ----- First turn ----- */
 app.post("/assistant/ask", async (req, res) => {
   try {
     const body = bodyObj(req);
     const { message, text, model, thread_id: providedThread } = body;
-
-    const userText =
-      (typeof message === "string" && message) ||
-      (typeof text === "string" && text) || "";
+    const userText = (typeof message === "string" && message) || (typeof text === "string" && text) || "";
     if (!userText) return res.status(400).json({ ok: false, error: "Field 'message' (or 'text') is required" });
 
     const payload = {
-      store: true,
-      model: model || DEFAULT_MODEL,   // required by /v1/responses
+      model: model || DEFAULT_MODEL,      // required
       input: blocks(userText),
-      assistant_id: ASST_ID,
-      ...(ASST_INSTRUCTIONS ? { instructions: ASST_INSTRUCTIONS } : {}),
+      ...(USE_ASSISTANT ? { assistant_id: ASST_DEFAULT, store: true } : {}),
     };
 
     const data = await callResponses(payload);
     const answer = extractText(data);
 
-    if (providedThread && typeof providedThread === "string" && data?.id) {
+    if (USE_ASSISTANT && providedThread && typeof providedThread === "string" && data?.id) {
       lastResponseIdByThread.set(providedThread, data.id);
     }
-
     return res.json({ ok: true, answer, data_id: data?.id ?? null });
   } catch (e) {
     return res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
@@ -224,29 +175,25 @@ app.post("/send", async (req, res) => {
     const body = bodyObj(req);
     const { thread_id, thread, text, message, model } = body;
 
-    const conv =
-      (typeof thread_id === "string" && thread_id) ||
-      (typeof thread === "string" && thread) || "";
-    const userText =
-      (typeof text === "string" && text) ||
-      (typeof message === "string" && message) || "";
-
+    const conv = (typeof thread_id === "string" && thread_id) || (typeof thread === "string" && thread) || "";
+    const userText = (typeof text === "string" && text) || (typeof message === "string" && message) || "";
     if (!conv)     return res.status(400).json({ ok: false, error: "Field 'thread_id' (or 'thread') is required" });
     if (!userText) return res.status(400).json({ ok: false, error: "Field 'text' (or 'message') is required" });
 
-    const prior = lastResponseIdByThread.get(conv);
+    const prior = USE_ASSISTANT ? lastResponseIdByThread.get(conv) : undefined;
 
     const payload = {
-      store: true,
-      ...(prior ? { previous_response_id: prior } : {}),
-      model: model || DEFAULT_MODEL,   // required
+      model: model || DEFAULT_MODEL,      // required
       input: blocks(userText),
-      assistant_id: ASST_ID,
-      ...(ASST_INSTRUCTIONS ? { instructions: ASST_INSTRUCTIONS } : {}),
+      ...(USE_ASSISTANT ? {
+        assistant_id: ASST_DEFAULT,
+        store: true,
+        ...(prior ? { previous_response_id: prior } : {}),
+      } : {}),
     };
 
     const data = await callResponses(payload);
-    if (data?.id) lastResponseIdByThread.set(conv, data.id);
+    if (USE_ASSISTANT && data?.id) lastResponseIdByThread.set(conv, data.id);
 
     const msg = extractText(data);
     return res.json({ ok: true, message: msg, data_id: data?.id ?? null });
@@ -255,21 +202,15 @@ app.post("/send", async (req, res) => {
   }
 });
 
-/* ----- Dev token for local tests ----- */
+/* ----- Dev token ----- */
 app.post("/dev/make-token", (req, res) => {
   try {
-    if (!on(process.env.DEV_TOKEN_ENABLED)) {
-      return res.status(403).json({ ok: false, error: "Disabled" });
-    }
+    if (!on(process.env.DEV_TOKEN_ENABLED)) return res.status(403).json({ ok: false, error: "Disabled" });
     const body = bodyObj(req);
     const { email, name = "Guest", campaign = "dev" } = body;
-    if (!email || typeof email !== "string") {
-      return res.status(400).json({ ok: false, error: "Field 'email' (string) is required" });
-    }
-
+    if (!email || typeof email !== "string") return res.status(400).json({ ok: false, error: "Field 'email' (string) is required" });
     const secret = process.env.JWT_SECRET;
     if (!secret) return res.status(500).json({ ok: false, error: "JWT_SECRET missing" });
-
     const token = jwt.sign({ email, name, campaign }, secret, { expiresIn: "1h" });
     res.json({ ok: true, token });
   } catch (e) {
@@ -277,7 +218,7 @@ app.post("/dev/make-token", (req, res) => {
   }
 });
 
-/* ----- Optional: Chat Completions probe ----- */
+/* ----- Optional Chat Completions probe ----- */
 app.post("/chat", async (_req, res) => {
   try {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -293,7 +234,7 @@ app.post("/chat", async (_req, res) => {
   }
 });
 
-/* ----- Admin: trigger Notion → Vector Store sync ----- */
+/* ----- Admin: Notion sync ----- */
 app.post("/admin/sync-knowledge", async (req, res) => {
   const header = req.headers["authorization"] || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
@@ -306,12 +247,10 @@ app.post("/admin/sync-knowledge", async (req, res) => {
   const child = spawn(process.execPath, [scriptPath], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
 
   let stdout = "", stderr = "";
-  child.stdout.on("data", (d) => (stdout += d.toString()));
-  child.stderr.on("data", (d) => (stderr += d.toString()));
-  child.on("error", (err) => res.status(500).json({ ok: false, error: `spawn error: ${err.message}` }));
-  child.on("close", (code) =>
-    res.status(code === 0 ? 200 : 500).json({ ok: code === 0, code, stdout: stdout.trim(), stderr: stderr.trim() })
-  );
+  child.stdout.on("data", d => (stdout += d.toString()));
+  child.stderr.on("data", d => (stderr += d.toString()));
+  child.on("error", err => res.status(500).json({ ok: false, error: `spawn error: ${err.message}` }));
+  child.on("close", code => res.status(code === 0 ? 200 : 500).json({ ok: code === 0, code, stdout: stdout.trim(), stderr: stderr.trim() }));
 });
 
 /* ----- 404 ----- */
@@ -321,7 +260,4 @@ app.use((_req, res) => res.status(404).json({ ok: false, error: "Not Found" }));
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`✓ Assistant server listening on http://localhost:${PORT}`);
-  for (const k of ["OPENAI_API_KEY", "ASST_DEFAULT"]) {
-    if (!process.env[k]) console.warn(`! Warning: ${k} is not set`);
-  }
 });
