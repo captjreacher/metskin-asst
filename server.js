@@ -10,10 +10,11 @@ import crypto from 'node:crypto';
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
-app.enable('trust proxy'); // required on Render
+app.enable('trust proxy');                 // required on Render
+app.use(express.json());
 
-// Canonical host (optional but recommended)
-const CANONICAL_HOST = process.env.CANONICAL_HOST; // e.g. metamorphosis.assist.maximisedai.com
+// Canonical host redirect (optional)
+const CANONICAL_HOST = (process.env.CANONICAL_HOST || '').trim(); // e.g. metamorphosis.assist.maximisedai.com
 app.use((req, res, next) => {
   if (CANONICAL_HOST && req.headers.host && req.headers.host !== CANONICAL_HOST) {
     return res.redirect(301, `https://${CANONICAL_HOST}${req.originalUrl}`);
@@ -27,7 +28,7 @@ app.use((_, res, next) => {
   next();
 });
 
-// CORS (lock to your domain + local dev)
+// CORS (tighten as you prefer)
 const ALLOW_ORIGINS = new Set([
   'https://metamorphosis.assist.maximisedai.com',
   'http://localhost:3000',
@@ -35,23 +36,19 @@ const ALLOW_ORIGINS = new Set([
 ]);
 app.use(cors({
   origin(origin, cb) {
-    if (!origin) return cb(null, true);       // curl/Postman/server-to-server
+    if (!origin) return cb(null, true);   // curl/Postman/server-to-server
     cb(null, ALLOW_ORIGINS.has(origin));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
-app.use(express.json());
 
-// ---------- Admin token (ONE copy only) ----------
+// ---------- Admin token (one source only) ----------
 const ADMIN = (process.env.ADMIN_TOKEN || process.env.ADMIN_API_TOKEN || '').trim();
 const ADMIN_SOURCE = process.env.ADMIN_TOKEN
   ? 'ADMIN_TOKEN'
   : (process.env.ADMIN_API_TOKEN ? 'ADMIN_API_TOKEN' : 'none');
-const ADMIN_LAST4 = ADMIN ? ADMIN.slice(-4) : null;
-
-console.log(`[boot] admin source=${ADMIN_SOURCE} len=${ADMIN.length}`);
 
 function requireAdminBearer(req, res, next) {
   const h = req.headers.authorization || '';
@@ -60,232 +57,146 @@ function requireAdminBearer(req, res, next) {
   next();
 }
 
-// ---------- Notion config ----------
-const NOTION_TOKEN  = process.env.NOTION_TOKEN || '';
-const NOTION_DB_ID  = process.env.NOTION_SAMPLES_DB_ID || process.env.NOTION_DB_ID || '';
+// ---------- Notion configuration ----------
 const NOTION_VERSION = '2022-06-28';
-const notionEnabled = Boolean(NOTION_TOKEN && NOTION_DB_ID);
 
-const NOTION_H = {
-  'Authorization': `Bearer ${NOTION_TOKEN}`,
-  'Notion-Version': NOTION_VERSION,
-  'Content-Type': 'application/json',
-};
-// env
-const NOTION_TOKEN = process.env.NOTION_TOKEN;
-const NOTION_DB_ID = process.env.NOTION_DB_ID;
+// “Default/ops” DB (if you keep it for logs etc.)
+const NOTION_TOKEN_DEFAULT = (process.env.NOTION_TOKEN || '').trim();
+const NOTION_DB_ID_DEFAULT = (process.env.NOTION_DB_ID || '').trim();
 
-const NOTION_TOKEN_SAMPLES = process.env.NOTION_TOKEN_SAMPLES || NOTION_TOKEN;
-const NOTION_SAMPLES_DB_ID = process.env.NOTION_SAMPLES_DB_ID;
+// **Samples DB (this is the one the PATCH route uses)**
+const NOTION_TOKEN_SAMPLES = (process.env.NOTION_TOKEN_SAMPLES || NOTION_TOKEN_DEFAULT).trim();
+const NOTION_SAMPLES_DB_ID = (process.env.NOTION_SAMPLES_DB_ID || '').trim();
 
-const NOTION_TITLE_PROP = process.env.NOTION_TITLE_PROP || "Name";
+// Title property to search by (page “Name”)
+const NOTION_TITLE_PROP = (process.env.NOTION_TITLE_PROP || 'Name').trim();
 
-// generic Notion fetch that can use either token
-async function notionFetch(path, { token = NOTION_TOKEN, method = "GET", body } = {}) {
+const notionEnabled = Boolean(NOTION_TOKEN_SAMPLES && NOTION_SAMPLES_DB_ID);
+
+// Generic Notion fetch (pick token per call)
+async function notionFetch(path, { token = NOTION_TOKEN_DEFAULT, method = 'GET', body } = {}) {
   const resp = await fetch(`https://api.notion.com/v1${path}`, {
     method,
     headers: {
-      "Authorization": `Bearer ${token}`,
-      "Notion-Version": "2022-06-28",
-      "Content-Type": "application/json",
+      'Authorization'  : `Bearer ${token}`,
+      'Notion-Version' : NOTION_VERSION,
+      'Content-Type'   : 'application/json',
     },
     body: body ? JSON.stringify(body) : undefined,
   });
   const json = await resp.json().catch(() => ({}));
   return { resp, json };
 }
-// PATCH /dev/samples/:sample_id/status
-app.patch("/dev/samples/:sample_id/status", async (req, res) => {
-  try {
-    if (!NOTION_SAMPLES_DB_ID) {
-      return res.status(500).json({ ok: false, error: "MISSING_NOTION_SAMPLES_DB_ID" });
-    }
-
-    const { sample_id } = req.params;
-    const { order_status, sent_by } = req.body || {};
-
-    // 1) find the page in Samples DB by title
-    const queryBody = {
-      filter: { property: NOTION_TITLE_PROP, title: { equals: sample_id } },
-      page_size: 2,
-    };
-    const { resp: qResp, json: qJson } = await notionFetch(
-      `/databases/${NOTION_SAMPLES_DB_ID}/query`,
-      { token: NOTION_TOKEN_SAMPLES, method: "POST", body: queryBody }
-    );
-
-    if (!qResp.ok) {
-      return res.status(qResp.status).json({ ok: false, error: "NOTION_QUERY_FAILED", detail: qJson });
-    }
-    if (!qJson.results?.length) {
-      return res.status(404).json({ ok: false, error: "SAMPLE_NOT_FOUND", sample_id });
-    }
-
-    const pageId = qJson.results[0].id;
-
-    // 2) update properties on that page
-    const updateBody = {
-      properties: {
-        order_status: { rich_text: [{ text: { content: String(order_status ?? "") } }] },
-        sent_by:     { rich_text: [{ text: { content: String(sent_by ?? "") } }] },
-        date_sent:   { date: { start: new Date().toISOString().slice(0,10) } },
-      }
-    };
-
-    const { resp: uResp, json: uJson } = await notionFetch(
-      `/pages/${pageId}`,
-      { token: NOTION_TOKEN_SAMPLES, method: "PATCH", body: updateBody }
-    );
-
-    return res.status(uResp.status).json({ ok: uResp.ok, detail: uJson });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: "SERVER_ERROR", detail: String(err) });
-  }
-});
-
-// ---------- Helpers ----------
-const nowIso = () => new Date().toISOString();
-const redact = (str, keep = 4) => {
-  if (!str) return '';
-  if (str.length <= keep) return '*'.repeat(str.length);
-  return `${str.slice(0, keep)}…${'*'.repeat(Math.max(0, str.length - keep - 1))}`;
-};
-
-// Optional: simple log row creator
-async function notionCreateSampleLog({ threadId, runId, args = {}, downstream = {}, meta = {} }) {
-  if (!notionEnabled) return { skipped: true, reason: 'notion disabled' };
-
-  const props = {
-    Name:     { title: [{ text: { content: `Thread ${threadId || ''}` } }] },
-    Run:      { rich_text: [{ text: { content: runId || '' } }] },
-    Thread:   threadId ? { rich_text: [{ text: { content: threadId } }] } : undefined,
-    Campaign: meta?.campaign ? { rich_text: [{ text: { content: meta.campaign } }] } : undefined,
-    Args:       Object.keys(args).length ? { rich_text: [{ text: { content: JSON.stringify(args) } }] } : undefined,
-    Downstream: Object.keys(downstream).length ? { rich_text: [{ text: { content: JSON.stringify(downstream) } }] } : undefined,
-  };
-  Object.keys(props).forEach(k => props[k] === undefined && delete props[k]);
-
-  const r = await fetch('https://api.notion.com/v1/pages', {
-    method: 'POST',
-    headers: NOTION_H,
-    body: JSON.stringify({ parent: { database_id: NOTION_DB_ID }, properties: props }),
-  });
-  const j = await r.json();
-  if (!r.ok) throw new Error(`Notion create failed: ${r.status} ${JSON.stringify(j)}`);
-  return { ok: true, page_id: j.id };
-}
-
-// Find a page by Sample_id (TITLE) and update Order_status (RICH_TEXT)
-async function notionUpdateBySampleId({ sample_id, order_status, sent_by }) {
-  if (!notionEnabled) throw new Error('Notion not configured');
-
-  // Query by exact title; switch to "contains" if needed.
-  const q = await fetch(`https://api.notion.com/v1/databases/${NOTION_DB_ID}/query`, {
-    method: 'POST',
-    headers: NOTION_H,
-    body: JSON.stringify({
-      filter: { property: 'sample_id', title: { equals: sample_id } },
-      page_size: 1,
-    }),
-  });
-  const qj = await q.json();
-  if (!q.ok) throw new Error(`Notion query failed: ${q.status} ${JSON.stringify(qj)}`);
-
-  const page = qj.results?.[0];
-  if (!page) throw new Error(`sample_id "${sample_id}" not found`);
-
-  const props = {
-    // order_status is rich_text (NOT select)
-    'order_status': { rich_text: [{ text: { content: String(order_status || '') } }] },
-    'date_sent':    { date: { start: nowIso() } },
-    'sent_by':      { rich_text: [{ text: { content: String(sent_by || '') } }] },
-  };
-
-  const u = await fetch(`https://api.notion.com/v1/pages/${page.id}`, {
-    method: 'PATCH',
-    headers: NOTION_H,
-    body: JSON.stringify({ properties: props }),
-  });
-  const uj = await u.json();
-  if (!u.ok) throw new Error(`Notion update failed: ${u.status} ${JSON.stringify(uj)}`);
-
-  return { ok: true, page_id: page.id };
-}
 
 // ---------- Routes ----------
-app.get("/health", (req, res) => {
+
+// health
+app.get('/health', (_req, res) => {
   res.json({
     ok: true,
-    admin: { source: "ADMIN_API_TOKEN", len: (process.env.ADMIN_API_TOKEN || "").length },
+    admin: { source: ADMIN_SOURCE, len: ADMIN.length },
     env: {
-      notion_db_id: (NOTION_DB_ID || "").slice(0,8) || null,
-      notion_samples_db_id: (NOTION_SAMPLES_DB_ID || "").slice(0,8) || null,
+      notion_samples_db_id: NOTION_SAMPLES_DB_ID ? NOTION_SAMPLES_DB_ID.slice(0, 8) : null,
       tokens: {
-        default_len: (NOTION_TOKEN || "").length,
-        samples_len: (NOTION_TOKEN_SAMPLES || "").length,
-        same: NOTION_TOKEN && NOTION_TOKEN_SAMPLES
-              ? NOTION_TOKEN === NOTION_TOKEN_SAMPLES
+        samples_len: NOTION_TOKEN_SAMPLES.length,
+        default_len: NOTION_TOKEN_DEFAULT.length,
+        same: NOTION_TOKEN_SAMPLES && NOTION_TOKEN_DEFAULT
+              ? NOTION_TOKEN_SAMPLES === NOTION_TOKEN_DEFAULT
               : null,
       },
+      title_prop: NOTION_TITLE_PROP,
     },
-    routes: ["GET /health", "GET /dev/auth/ping", "PATCH /dev/samples/:sample_id/status"],
+    routes: [
+      'GET  /health',
+      'GET  /dev/auth/ping',
+      'GET  /dev/debug/echo-auth',
+      'PATCH /dev/samples/:sample_id/status',
+    ],
   });
 });
 
+// keep a single root route
+app.get('/', (_req, res) => res.redirect(302, '/health'));
 
-// Option A: redirect root to health
-app.get('/', (req, res) => res.redirect(302, '/health'));
-
-// Option B: small landing JSON
-app.get('/', (req, res) => {
-  res.json({
-    ok: true,
-    service: 'metskin-asst',
-    endpoints: [
-      'GET /health',
-      'GET /dev/auth/ping',
-      'PATCH /dev/samples/:sample_id/status'
-    ]
-  });
-});
-
-// Debug: show what Authorization header the server received
+// debug: echo what Authorization the server received
 app.get('/dev/debug/echo-auth', (req, res) => {
   res.json({ auth: req.headers.authorization || null });
 });
 
-// Protected ping (auth only, no Notion)
-app.get('/dev/auth/ping', requireAdminBearer, (req, res) => {
+// protected ping (auth only, no Notion)
+app.get('/dev/auth/ping', requireAdminBearer, (_req, res) => {
   res.json({ ok: true, message: 'auth ok' });
 });
 
-// Update status by sample_id (Admin-protected)
+// PATCH: update a Samples row by its title (sample_id) -> order_status/sent_by/date_sent
 app.patch('/dev/samples/:sample_id/status', requireAdminBearer, async (req, res) => {
+  if (!notionEnabled) {
+    return res.status(500).json({
+      ok: false,
+      error: 'NOTION_SAMPLES_NOT_CONFIGURED',
+      detail: 'Set NOTION_TOKEN_SAMPLES and NOTION_SAMPLES_DB_ID',
+    });
+  }
+
   try {
     const { sample_id } = req.params;
     const { order_status, sent_by } = req.body || {};
+
     if (!sample_id)    return res.status(400).json({ ok: false, error: 'sample_id is required' });
     if (!order_status) return res.status(400).json({ ok: false, error: 'order_status is required' });
 
-    const result = await notionUpdateBySampleId({ sample_id, order_status, sent_by });
-    res.json({ ok: true, sample_id, order_status, sent_by, result });
+    // 1) Find the page by title equals sample_id
+    const queryBody = {
+      filter: { property: NOTION_TITLE_PROP, title: { equals: String(sample_id) } },
+      page_size: 2,
+    };
+    const { resp: qResp, json: qJson } = await notionFetch(
+      `/databases/${NOTION_SAMPLES_DB_ID}/query`,
+      { token: NOTION_TOKEN_SAMPLES, method: 'POST', body: queryBody },
+    );
+
+    if (!qResp.ok) {
+      return res.status(qResp.status).json({ ok: false, error: 'NOTION_QUERY_FAILED', detail: qJson });
+    }
+    if (!qJson.results?.length) {
+      return res.status(404).json({ ok: false, error: 'SAMPLE_NOT_FOUND', sample_id });
+    }
+
+    const pageId = qJson.results[0].id;
+
+    // 2) Update the properties (rich_text + date)
+    const updateBody = {
+      properties: {
+        order_status: { rich_text: [{ text: { content: String(order_status ?? '') } }] },
+        sent_by:      { rich_text: [{ text: { content: String(sent_by ?? '') } }] },
+        date_sent:    { date: { start: new Date().toISOString().slice(0, 10) } },
+      },
+    };
+
+    const { resp: uResp, json: uJson } = await notionFetch(
+      `/pages/${pageId}`,
+      { token: NOTION_TOKEN_SAMPLES, method: 'PATCH', body: updateBody },
+    );
+
+    return res.status(uResp.status).json({ ok: uResp.ok, page_id: pageId, detail: uJson });
   } catch (err) {
-    console.error('[PATCH /dev/samples/:sample_id/status] error:', err);
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
+    return res.status(500).json({ ok: false, error: 'SERVER_ERROR', detail: String(err) });
   }
 });
 
-// (Optional) Dev helper: mint a token
-app.post('/dev/make-token', (req, res) => {
+// dev helper – mint a token
+app.post('/dev/make-token', (_req, res) => {
   const token = 'dev_' + crypto.randomBytes(16).toString('hex');
   res.json({ ok: true, token });
 });
 
-// Fallback 404
+// 404 fallback
 app.use((req, res) => res.status(404).json({ ok: false, error: 'not_found', path: req.path }));
 
 // ---------- Start ----------
 app.listen(PORT, () => {
   console.log(`API listening on ${PORT}`);
-  if (!notionEnabled) console.log('[warn] Notion disabled – set NOTION_TOKEN and NOTION_DB_ID/NOTION_SAMPLES_DB_ID');
+  if (!notionEnabled) {
+    console.log('[warn] Notion Samples disabled – set NOTION_TOKEN_SAMPLES and NOTION_SAMPLES_DB_ID');
+  }
 });
