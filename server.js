@@ -118,12 +118,10 @@ app.post("/assistant/ask", async (req, res) => {
     if (!message || typeof message !== "string") {
       return res.status(400).json({ ok:false, error:"Field 'message' is required" });
     }
-
     const { OPENAI_API_KEY, ASST_DEFAULT } = process.env;
     if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:"OPENAI_API_KEY missing" });
     if (!ASST_DEFAULT)   return res.status(500).json({ ok:false, error:"ASST_DEFAULT missing (assistant id)" });
 
-    // Use your Assistant ID so its attached vector store is used automatically.
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
@@ -131,10 +129,28 @@ app.post("/assistant/ask", async (req, res) => {
         "Authorization": `Bearer ${OPENAI_API_KEY}`
       },
       body: JSON.stringify({
-        model: ASST_DEFAULT,                         // e.g., asst_oex3IP6Y…
-        input: [{ role: "user", content: message }]  // no 'tools' or 'tool_resources' needed here
+        assistant_id: ASST_DEFAULT,                 // ✅ run the assistant
+        input: [{ role: "user", content: message }] // no tools/tool_resources here
       })
     });
+
+    const data = await r.json();
+    if (!r.ok) {
+      const msg = (data && (data.error?.message || data.message)) || "OpenAI error";
+      return res.status(r.status).json({ ok:false, error: msg });
+    }
+
+    const answer =
+      data.output_text ??
+      (Array.isArray(data.output) && data.output[0]?.content?.[0]?.text) ??
+      "";
+
+    return res.json({ ok:true, answer });
+  } catch (err) {
+    return res.status(500).json({ ok:false, error: err.message });
+  }
+});
+
 
     const data = await r.json();
     if (!r.ok) {
