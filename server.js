@@ -6,6 +6,7 @@ import jwt from "jsonwebtoken";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import fetch from "node-fetch";
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -69,7 +70,12 @@ app.get("/", (_req, res) =>
       body: JSON.stringify({
         assistant_id: ASST_DEFAULT,
         model: model || DEFAULT_MODEL,
-        input: [{ role: "user", content: message }],
+        input: [
+          {
+            role: "user",
+            content: [{ type: "text", text: message }],
+          },
+        ],
       }),
     });
 
@@ -128,7 +134,12 @@ app.post("/send", async (req, res) => {
         conversation: thread_id,
         assistant_id: ASST_DEFAULT,
         model: model || DEFAULT_MODEL,
-        input: [{ role: "user", content: text }],
+        input: [
+          {
+            role: "user",
+            content: [{ type: "text", text }],
+          },
+        ],
       }),
     });
 
