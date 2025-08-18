@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import fetch from "node-fetch";
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
