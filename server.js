@@ -89,13 +89,12 @@ function bodyObj(req) {
 }
 
 /* -------------------- OpenAI /v1/responses -------------------- */
-const OA_URL = "https://api.openai.com/v1/responses";
 const OA_HEADERS = {
-  Authorization: `Bearer ${OPENAI_API_KEY}`,
+  Authorization: `Bearer ${OPENAI_API_KEY}`,   // <— backticks here
   "Content-Type": "application/json",
-  // REQUIRED when using `assistant_id` with /v1/responses
-  "OpenAI-Beta": "assistants=v2",
+  "OpenAI-Beta": "assistants=v2",              // required with assistant_id
 };
+
 
 function blocks(text) {
   return [{ role: "user", content: [{ type: "text", text: String(text ?? "") }] }];
