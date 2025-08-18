@@ -71,6 +71,77 @@ const NOTION_H = {
   'Notion-Version': NOTION_VERSION,
   'Content-Type': 'application/json',
 };
+// env
+const NOTION_TOKEN = process.env.NOTION_TOKEN;
+const NOTION_DB_ID = process.env.NOTION_DB_ID;
+
+const NOTION_TOKEN_SAMPLES = process.env.NOTION_TOKEN_SAMPLES || NOTION_TOKEN;
+const NOTION_SAMPLES_DB_ID = process.env.NOTION_SAMPLES_DB_ID;
+
+const NOTION_TITLE_PROP = process.env.NOTION_TITLE_PROP || "Name";
+
+// generic Notion fetch that can use either token
+async function notionFetch(path, { token = NOTION_TOKEN, method = "GET", body } = {}) {
+  const resp = await fetch(`https://api.notion.com/v1${path}`, {
+    method,
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Notion-Version": "2022-06-28",
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const json = await resp.json().catch(() => ({}));
+  return { resp, json };
+}
+// PATCH /dev/samples/:sample_id/status
+app.patch("/dev/samples/:sample_id/status", async (req, res) => {
+  try {
+    if (!NOTION_SAMPLES_DB_ID) {
+      return res.status(500).json({ ok: false, error: "MISSING_NOTION_SAMPLES_DB_ID" });
+    }
+
+    const { sample_id } = req.params;
+    const { order_status, sent_by } = req.body || {};
+
+    // 1) find the page in Samples DB by title
+    const queryBody = {
+      filter: { property: NOTION_TITLE_PROP, title: { equals: sample_id } },
+      page_size: 2,
+    };
+    const { resp: qResp, json: qJson } = await notionFetch(
+      `/databases/${NOTION_SAMPLES_DB_ID}/query`,
+      { token: NOTION_TOKEN_SAMPLES, method: "POST", body: queryBody }
+    );
+
+    if (!qResp.ok) {
+      return res.status(qResp.status).json({ ok: false, error: "NOTION_QUERY_FAILED", detail: qJson });
+    }
+    if (!qJson.results?.length) {
+      return res.status(404).json({ ok: false, error: "SAMPLE_NOT_FOUND", sample_id });
+    }
+
+    const pageId = qJson.results[0].id;
+
+    // 2) update properties on that page
+    const updateBody = {
+      properties: {
+        order_status: { rich_text: [{ text: { content: String(order_status ?? "") } }] },
+        sent_by:     { rich_text: [{ text: { content: String(sent_by ?? "") } }] },
+        date_sent:   { date: { start: new Date().toISOString().slice(0,10) } },
+      }
+    };
+
+    const { resp: uResp, json: uJson } = await notionFetch(
+      `/pages/${pageId}`,
+      { token: NOTION_TOKEN_SAMPLES, method: "PATCH", body: updateBody }
+    );
+
+    return res.status(uResp.status).json({ ok: uResp.ok, detail: uJson });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: "SERVER_ERROR", detail: String(err) });
+  }
+});
 
 // ---------- Helpers ----------
 const nowIso = () => new Date().toISOString();
@@ -142,20 +213,25 @@ async function notionUpdateBySampleId({ sample_id, order_status, sent_by }) {
 }
 
 // ---------- Routes ----------
-app.get('/health', (req, res) => {
+app.get("/health", (req, res) => {
   res.json({
     ok: true,
-    time: nowIso(),
-    admin: { source: ADMIN_SOURCE, len: ADMIN.length, last4: ADMIN_LAST4 },
-    env: { port: String(PORT), notion_enabled: notionEnabled, notion_db_id: redact(NOTION_DB_ID) },
-    routes: [
-      'GET    /health',
-      'GET    /dev/auth/ping',
-      'GET    /dev/debug/echo-auth',
-      'PATCH  /dev/samples/:sample_id/status',
-    ],
+    admin: { source: "ADMIN_API_TOKEN", len: (process.env.ADMIN_API_TOKEN || "").length },
+    env: {
+      notion_db_id: (NOTION_DB_ID || "").slice(0,8) || null,
+      notion_samples_db_id: (NOTION_SAMPLES_DB_ID || "").slice(0,8) || null,
+      tokens: {
+        default_len: (NOTION_TOKEN || "").length,
+        samples_len: (NOTION_TOKEN_SAMPLES || "").length,
+        same: NOTION_TOKEN && NOTION_TOKEN_SAMPLES
+              ? NOTION_TOKEN === NOTION_TOKEN_SAMPLES
+              : null,
+      },
+    },
+    routes: ["GET /health", "GET /dev/auth/ping", "PATCH /dev/samples/:sample_id/status"],
   });
 });
+
 
 // Option A: redirect root to health
 app.get('/', (req, res) => res.redirect(302, '/health'));
