@@ -26,6 +26,26 @@ const app = express();
 
 // ---------- Basic Middlewares ----------
 app.use(express.json({ limit: "1mb" }));
+
+// Return JSON instead of HTML on bad JSON bodies
+app.use((err, req, res, next) => {
+  if (err && err.type === "entity.parse.failed") {
+    return res.status(400).json({
+      ok: false,
+      error: "Invalid JSON payload",
+      details: String(err.message || "")
+    });
+  }
+  next(err);
+});
+
+// Also accept raw text for these endpoints (curl/PowerShell quirks)
+app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
+
+function safeParseJson(s) {
+  try { return JSON.parse(s); } catch { return {}; }
+}
+
 app.use(express.static(path.join(__dirname, "public")));
 
 if (process.env.DEBUG_LOG_REQUESTS === "1") {
@@ -49,6 +69,15 @@ function boolEnv(name, def = false) {
   if (v == null) return def;
   return ["1", "true", "yes", "on"].includes(String(v).toLowerCase());
 }
+// Log sanitized bodies for the two routes
+function redact(o){ try { return JSON.parse(JSON.stringify(o||{})); } catch { return {}; } }
+app.use((req, _res, next) => {
+  const dbg = (process.env.DEBUG_LOG_BODIES||"").match(/^(1|true|yes|on)$/i);
+  if (dbg && (req.path === "/assistant/ask" || req.path === "/send")) {
+    console.log(`[BODY ${req.method} ${req.path}]`, typeof req.body === "string" ? req.body : redact(req.body));
+  }
+  next();
+});
 
 const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
 const ASST_DEFAULT = requireEnv("ASST_DEFAULT");
@@ -190,6 +219,31 @@ app.post("/assistant/ask", async (req, res) => {
       .status(e.status || 500)
       .json({ ok: false, error: e.message, details: e.data ?? null });
   }
+});
+
+// /assistant/ask
+app.post("/assistant/ask", async (req, res) => {
+  try {
+    const body = typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {});
+    const { message, text, model } = body;
+    const userText = (typeof message === "string" && message) || (typeof text === "string" && text) || "";
+    if (!userText) return res.status(400).json({ ok: false, error: "Field 'message' (or 'text') is required" });
+
+    // ...call OpenAI with blocks(userText) as before...
+  } catch (e) { /* unchanged */ }
+});
+// /send
+app.post("/send", async (req, res) => {
+  try {
+    const body = typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {});
+    const { thread_id, thread, text, message, model } = body;
+    const conv = (typeof thread_id === "string" && thread_id) || (typeof thread === "string" && thread) || "";
+    const userText = (typeof text === "string" && text) || (typeof message === "string" && message) || "";
+    if (!conv) return res.status(400).json({ ok: false, error: "Field 'thread_id' (or 'thread') is required" });
+    if (!userText) return res.status(400).json({ ok: false, error: "Field 'text' (or 'message') is required" });
+
+    // ...call OpenAI with blocks(userText) + conversation: conv...
+  } catch (e) { /* unchanged */ }
 });
 
 // ---------- Assistant: Send to existing conversation ----------
