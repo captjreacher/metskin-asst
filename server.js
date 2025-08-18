@@ -37,9 +37,9 @@ function requireEnv(name) {
   return v;
 }
 
-const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
-const ASST_DEFAULT   = requireEnv("ASST_DEFAULT");
-const DEFAULT_MODEL  = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const OPENAI_API_KEY    = requireEnv("OPENAI_API_KEY");
+const ASST_INSTRUCTIONS = requireEnv("ASST_DEFAULT");
+const DEFAULT_MODEL     = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
 /* -------------------- Parsers & Error Handling -------------------- */
 app.use(express.json({ limit: "1mb" }));
@@ -194,10 +194,10 @@ app.post("/assistant/ask", async (req, res) => {
     if (!userText) return res.status(400).json({ ok: false, error: "Field 'message' (or 'text') is required" });
 
     const payload = {
-      assistant_id: ASST_DEFAULT,
       store: true,
       model: model || DEFAULT_MODEL,   // required by /v1/responses
       input: blocks(userText),
+      instructions: ASST_INSTRUCTIONS,
     };
 
     const data = await callResponses(payload);
@@ -232,11 +232,11 @@ app.post("/send", async (req, res) => {
     const prior = lastResponseIdByThread.get(conv);
 
     const payload = {
-      assistant_id: ASST_DEFAULT,
       store: true,
       ...(prior ? { previous_response_id: prior } : {}),
       model: model || DEFAULT_MODEL,   // required
       input: blocks(userText),
+      instructions: ASST_INSTRUCTIONS,
     };
 
     const data = await callResponses(payload);
