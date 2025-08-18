@@ -93,7 +93,7 @@ const OA_HEADERS = {
 };
 
 function blocks(text) {
-  return [{ role: "user", content: [{ type: "text", text: String(text ?? "") }] }];
+  return [{ role: "user", content: [{ type: "input_text", text: String(text ?? "") }] }];
 }
 function extractText(data) {
   return (
