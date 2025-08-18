@@ -4,4 +4,3 @@ secrets/
 *.log
 .DS_Store
 Thumbs.db
-/knowledge

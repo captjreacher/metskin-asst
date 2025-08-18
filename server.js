@@ -1,31 +1,31 @@
 // server.js
 import express from "express";
-import fetch from "node-fetch";           // If on Node 18+ you can use global fetch and remove this
 import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
 app.use(express.json());
 
-// ---------- Simple Assistant UI (served at "/") ----------
-const assistantPage = /* html */ `<!doctype html>
+// ---------- Minimal Assistant UI at "/" ----------
+const page = /* html */ `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Metamorphosis Assistant</title>
   <style>
-    body { font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; background:#0b0b0c; color:#e9e9ea; }
-    header { padding: 16px 20px; background:#131316; border-bottom:1px solid #232327; }
-    main { max-width: 800px; margin: 24px auto; padding: 0 16px; }
-    #log { white-space: pre-wrap; background:#111; border:1px solid #202024; border-radius:12px; padding:16px; min-height:180px; }
-    form { display:flex; gap:8px; margin-top:16px; }
+    :root { color-scheme: dark; }
+    body { margin:0; font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:#0b0b0c; color:#e9e9ea; }
+    header { padding:14px 18px; border-bottom:1px solid #24242a; background:#121217; }
+    main { max-width:820px; margin:22px auto; padding:0 16px; }
+    #log { min-height:180px; background:#101014; border:1px solid #23232a; border-radius:12px; padding:14px; white-space:pre-wrap; }
+    form { display:flex; gap:8px; margin-top:14px; }
     input,button { font:inherit; }
-    input { flex:1; padding:12px 14px; border-radius:10px; border:1px solid #303036; background:#0f0f11; color:#e9e9ea; }
-    button { padding:12px 16px; border:1px solid #3a3a42; border-radius:10px; background:#1f37ff; color:#fff; cursor:pointer; }
+    input { flex:1; padding:12px 14px; border-radius:10px; border:1px solid #2e2e36; background:#0d0d12; color:#e9e9ea; }
+    button { padding:12px 16px; border-radius:10px; border:1px solid #3940ff33; background:#1f37ff; color:#fff; cursor:pointer; }
     button:disabled { opacity:.6; cursor:not-allowed; }
-    .sys { color:#8b8b94; }
     .err { color:#ff8a8a; }
+    .sys { color:#9aa; }
   </style>
 </head>
 <body>
@@ -43,23 +43,21 @@ const assistantPage = /* html */ `<!doctype html>
     const q = document.getElementById('q');
     const btn = document.getElementById('send');
 
-    function add(role, text, cls='') {
-      const who = role === 'user' ? 'You' : 'Assistant';
-      const line = document.createElement('div');
-      if (cls) line.className = cls;
-      line.textContent = who + ': ' + text;
+    const add = (role, text, cls='') => {
+      const div = document.createElement('div');
+      if (cls) div.className = cls;
+      div.textContent = (role === 'user' ? 'You' : 'Assistant') + ': ' + text;
       log.appendChild(document.createElement('br'));
-      log.appendChild(line);
+      log.appendChild(div);
       log.scrollTop = log.scrollHeight;
-    }
+    };
 
     f.addEventListener('submit', async (e) => {
       e.preventDefault();
       const message = q.value.trim();
       if (!message) return;
       add('user', message);
-      q.value = '';
-      btn.disabled = true;
+      q.value = ''; btn.disabled = true;
 
       try {
         const r = await fetch('/assistant/ask', {
@@ -80,38 +78,42 @@ const assistantPage = /* html */ `<!doctype html>
 </body>
 </html>`;
 
-// ---------- Routes ----------
+// ---------- Routes (order matters) ----------
 
-// Health: shows what’s enabled
-app.get("/health", (req, res) => {
-  res.json({
-    ok: true,
-    env: {
-      notion_samples_db_id: process.env.NOTION_SAMPLES_DB_ID || null,
-      title_prop: process.env.NOTION_TITLE_PROP || "Name",
-    },
-    routes: [
-      "GET  /            (assistant UI)",
-      "GET  /assistant   (assistant UI)",
-      "POST /assistant/ask",
-      "GET  /health"
-    ]
-  });
-});
+// Health (support both /health and /healthz so hosting checks never touch "/")
+const healthPayload = {
+  ok: true,
+  env: {
+    notion_samples_db_id: process.env.NOTION_SAMPLES_DB_ID || null,
+    title_prop: process.env.NOTION_TITLE_PROP || "Name",
+  },
+  routes: [
+    "GET  /            (assistant UI)",
+    "GET  /assistant   (assistant UI)",
+    "POST /assistant/ask",
+    "GET  /health",
+    "GET  /healthz"
+  ]
+};
+app.get("/health",  (_req, res) => res.json(healthPayload));
+app.get("/healthz", (_req, res) => res.json(healthPayload));
 
-// Serve the assistant UI on "/" and "/assistant"
-app.get("/", (_req, res) => res.type("html").send(assistantPage));
-app.get("/assistant", (_req, res) => res.type("html").send(assistantPage));
+// Root → Assistant UI (no redirects)
+app.get("/",          (_req, res) => res.type("html").send(page));
+app.get("/assistant", (_req, res) => res.type("html").send(page));
 
-// Assistant API: POST { message } -> answer
+// Assistant API
 app.post("/assistant/ask", async (req, res) => {
   try {
-    const { message } = req.body || {};
+    const { message } = req.body ?? {};
     if (!message || typeof message !== "string") {
-      return res.status(400).json({ ok: false, error: "Field 'message' is required" });
+      return res.status(400).json({ ok:false, error:"Field 'message' is required" });
+    }
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ ok:false, error:"OPENAI_API_KEY missing" });
     }
 
-    // Call OpenAI chat completions (uses your .env OPENAI_API_KEY)
+    // Use global fetch (Node 18+). Adjust model as you prefer.
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -119,7 +121,7 @@ app.post("/assistant/ask", async (req, res) => {
         "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",  // or any available model
+        model: "gpt-4o-mini",
         messages: [
           { role: "system", content: "You are a helpful assistant for Metamorphosis." },
           { role: "user", content: message }
@@ -129,13 +131,11 @@ app.post("/assistant/ask", async (req, res) => {
 
     const data = await r.json();
     if (!r.ok) {
-      return res.status(r.status).json({ ok: false, error: data.error?.message || "OpenAI error" });
+      return res.status(r.status).json({ ok:false, error: data?.error?.message || "OpenAI error" });
     }
-
-    const answer = data?.choices?.[0]?.message?.content ?? "";
-    res.json({ ok: true, answer });
+    res.json({ ok:true, answer: data?.choices?.[0]?.message?.content ?? "" });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok:false, error: err.message });
   }
 });
 
