@@ -1,4 +1,4 @@
-// server.js — Responses API using your Assistant (asst_…) + UI styled like index.html
+// server.js — Assistant (Responses API via assistant_id) + Chat Completions test + UI
 import express from "express";
 import dotenv from "dotenv";
 dotenv.config();
@@ -6,7 +6,7 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-// ---------- UI (mirrors your index.html look) ----------
+// ---------- Inlined UI (mirrors your index.html look) ----------
 const page = `<!doctype html>
 <html lang="en">
 <head>
@@ -19,7 +19,7 @@ const page = `<!doctype html>
   body { margin:0; font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:#0b0b0c; color:#e9e9ea }
   header { padding:14px 18px; border-bottom:1px solid #24242a; background:#121217 }
   main { max-width:960px; margin:22px auto; padding:0 16px }
-  .panel { border:1px solid #252a33; border-radius:12px; background:#0f1117; padding:14px; min-height:220px }
+  .panel { border:1px solid #252a33; border-radius:12px; background:#0f1117; padding:14px; min-height:220px; max-height:60vh; overflow:auto }
   .messages { display:flex; flex-direction:column; gap:10px }
   .bubble { padding:10px 12px; border-radius:12px; max-width:86%; word-wrap:break-word; white-space:pre-wrap }
   .bubble.user { align-self:flex-end; background:#22577a; color:#e9f1f6 }
@@ -29,7 +29,6 @@ const page = `<!doctype html>
   input { flex:1; padding:12px 14px; border-radius:10px; border:1px solid #2e2e36; background:#0d0d12; color:#e9e9ea }
   button { padding:12px 16px; border-radius:10px; border:1px solid #3940ff33; background:#1f37ff; color:#fff; cursor:pointer }
   button:disabled { opacity:.6; cursor:not-allowed }
-  .err { color:#ff8a8a }
 </style>
 </head>
 <body>
@@ -53,7 +52,7 @@ const page = `<!doctype html>
   const input = document.getElementById('q');
   const btn = document.getElementById('send');
 
-  function addBubble(role, text) {
+  function add(role, text) {
     const div = document.createElement('div');
     div.className = 'bubble ' + role;
     div.textContent = text;
@@ -66,9 +65,8 @@ const page = `<!doctype html>
     const message = input.value.trim();
     if (!message) return;
 
-    addBubble('user', message);
-    input.value = '';
-    btn.disabled = true;
+    add('user', message);
+    input.value=''; btn.disabled = true;
 
     try {
       const r = await fetch('/assistant/ask', {
@@ -78,9 +76,9 @@ const page = `<!doctype html>
       });
       const j = await r.json();
       if (!r.ok || !j.ok) throw new Error(j.error || 'Request failed');
-      addBubble('assistant', j.answer || '(no answer)');
+      add('assistant', j.answer || '(no answer)');
     } catch (err) {
-      addBubble('assistant', err.message);
+      add('assistant', err.message);
     } finally {
       btn.disabled = false;
     }
@@ -97,9 +95,10 @@ const health = {
     vector_store: process.env.VS_DEFAULT || null
   },
   routes: [
-    "GET  /",
-    "GET  /assistant",
-    "POST /assistant/ask (Responses API via Assistant)",
+    "GET  /  (UI)",
+    "GET  /assistant  (UI)",
+    "POST /assistant/ask  (Responses API via assistant_id)",
+    "POST /chat         (Chat Completions test)",
     "GET  /health",
     "GET  /healthz"
   ]
@@ -107,11 +106,11 @@ const health = {
 app.get("/health",  (_req, res) => res.json(health));
 app.get("/healthz", (_req, res) => res.json(health));
 
-// ---------- UI routes ----------
+// ---------- UI ----------
 app.get("/",          (_req, res) => res.type("html").send(page));
 app.get("/assistant", (_req, res) => res.type("html").send(page));
 
-// ---------- Assistant endpoint (Responses API; model = ASST_DEFAULT) ----------
+// ---------- Assistant endpoint (Responses API via assistant_id) ----------
 app.post("/assistant/ask", async (req, res) => {
   try {
     const { message } = req.body ?? {};
@@ -125,12 +124,12 @@ app.post("/assistant/ask", async (req, res) => {
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENAI_API_KEY}`
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        assistant_id: ASST_DEFAULT,                 // ✅ run the assistant
-        input: [{ role: "user", content: message }] // no tools/tool_resources here
+        assistant_id: ASST_DEFAULT,                 // ← run your Assistant (uses its attached vector store)
+        input: [{ role: "user", content: message }] // no tools/tool_resources required here
       })
     });
 
@@ -150,7 +149,8 @@ app.post("/assistant/ask", async (req, res) => {
     return res.status(500).json({ ok:false, error: err.message });
   }
 });
-// Simple Chat Completions test route (raw fetch)
+
+// ---------- Chat Completions test endpoint (raw fetch) ----------
 app.post("/chat", async (req, res) => {
   try {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -167,17 +167,18 @@ app.post("/chat", async (req, res) => {
 
     const data = await r.json();
     if (!r.ok) {
-      return res.status(r.status).json({ ok: false, error: data?.error?.message || "OpenAI error" });
+      return res.status(r.status).json({ ok:false, error: data?.error?.message || "OpenAI error" });
     }
 
-    // Return the first assistant message
     const answer = data.choices?.[0]?.message?.content ?? "";
-    res.json({ ok: true, answer });
+    res.json({ ok:true, answer });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    res.status(500).json({ ok:false, error: err.message });
   }
 });
 
 // ---------- Start ----------
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`Assistant ready on http://localhost:${PORT}`));
+const PORT = process.env.PORT || 10000;     // Render provides PORT; local can use .env PORT
+app.listen(PORT, () => {
+  console.log(`Assistant ready on http://localhost:${PORT}`);
+});
