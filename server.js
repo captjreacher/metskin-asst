@@ -69,7 +69,12 @@ app.get("/", (_req, res) =>
       body: JSON.stringify({
         assistant_id: ASST_DEFAULT,
         model: model || DEFAULT_MODEL,
-        input: [{ role: "user", content: message }],
+        input: [
+          {
+            role: "user",
+            content: [{ type: "text", text: message }],
+          },
+        ],
       }),
     });
 
@@ -128,7 +133,12 @@ app.post("/send", async (req, res) => {
         conversation: thread_id,
         assistant_id: ASST_DEFAULT,
         model: model || DEFAULT_MODEL,
-        input: [{ role: "user", content: text }],
+        input: [
+          {
+            role: "user",
+            content: [{ type: "text", text }],
+          },
+        ],
       }),
     });
 
