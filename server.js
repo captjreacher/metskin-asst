@@ -1,16 +1,12 @@
 /**
- * Metamorphosis Assistant — API Server (stabilized + flag for assistant_id)
- * -------------------------------------------------------------------------
- * Default: plain Responses mode (no assistant_id) => works everywhere.
- * Optional: set USE_ASSISTANT_ID=true to use Assistants v2 threading:
- *   - Sends "OpenAI-Beta: assistants=v2"
- *   - Adds assistant_id, store:true, previous_response_id
- *   - Requires model in both modes
- * Robustness:
- *   - Accepts JSON or raw text bodies for /assistant/ask and /send
- *   - Always uses content blocks
- *   - Returns JSON on parse errors (no HTML)
- *   - Loud debug logs (toggle with env)
+ * Metamorphosis Assistant — API Server (Vector Store enabled)
+ * -----------------------------------------------------------
+ * - Vector stores are attached to EVERY Responses API call.
+ * - Works without assistant_id (default) or with it (USE_ASSISTANT_ID=true).
+ * - Threads via previous_response_id (stored per thread_id).
+ * - Always sends content blocks; always includes a model.
+ * - Accepts JSON or raw text bodies; returns JSON errors.
+ * - Loud logging toggles: DEBUG_LOG_REQUESTS, DEBUG_LOG_BODIES, DEBUG_OPENAI.
  */
 
 import express from "express";
@@ -27,7 +23,7 @@ dotenv.config();
 /* -------------------- App / Debug -------------------- */
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const on = v => /^(1|true|yes|on)$/i.test(String(v || ""));
+const on = (v) => /^(1|true|yes|on)$/i.test(String(v || ""));
 const DBG_REQ = on(process.env.DEBUG_LOG_REQUESTS);
 const DBG_BOD = on(process.env.DEBUG_LOG_BODIES);
 const DBG_OA  = on(process.env.DEBUG_OPENAI);
@@ -39,30 +35,52 @@ function requireEnv(name) {
   return v;
 }
 
-const OPENAI_API_KEY  = requireEnv("OPENAI_API_KEY");
-const DEFAULT_MODEL   = process.env.OPENAI_MODEL || "gpt-4.1-mini";
-const USE_ASSISTANT   = on(process.env.USE_ASSISTANT_ID); // ← default false
-const ASST_DEFAULT    = USE_ASSISTANT ? requireEnv("ASST_DEFAULT") : process.env.ASST_DEFAULT;
+const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
+const DEFAULT_MODEL  = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+
+// Vector stores: comma-separated vs_ IDs
+const VECTOR_STORE_IDS = (process.env.VECTOR_STORE_IDS || "")
+  .split(",").map(s => s.trim()).filter(Boolean);
+
+// Global purpose/instructions for the assistant
+const ASST_INSTRUCTIONS =
+  process.env.ASST_INSTRUCTIONS ||
+  "You are the Metamorphosis Assistant. Use the knowledge base (file_search) to answer questions precisely. Prefer concise, actionable answers and cite relevant filenames when helpful.";
+
+const USE_ASSISTANT = on(process.env.USE_ASSISTANT_ID); // optional
+const ASST_DEFAULT  = USE_ASSISTANT ? requireEnv("ASST_DEFAULT") : process.env.ASST_DEFAULT;
 
 /* -------------------- Parsers & Error Handling -------------------- */
 app.use(express.json({ limit: "1mb" }));
 
+// Return JSON (not HTML) on JSON parse errors
 app.use((err, _req, res, next) => {
   if (err && err.type === "entity.parse.failed") {
-    return res.status(400).json({ ok: false, error: "Invalid JSON payload", details: String(err.message || "") });
+    return res.status(400).json({
+      ok: false,
+      error: "Invalid JSON payload",
+      details: String(err.message || ""),
+    });
   }
   next(err);
 });
 
+// Also accept raw text for these endpoints (curl/PowerShell quirks)
 app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
 
+// Static UI
 app.use(express.static(path.join(__dirname, "public")));
 
+// Request logger
 if (DBG_REQ) {
-  app.use((req, _res, next) => { console.log(`[REQ] ${req.method} ${req.url}`); next(); });
+  app.use((req, _res, next) => {
+    console.log(`[REQ] ${req.method} ${req.url}`);
+    next();
+  });
 }
 
-function redact(o){ try { return JSON.parse(JSON.stringify(o||{})); } catch { return {}; } }
+// Body logger (sanitized / string)
+function redact(obj) { try { return JSON.parse(JSON.stringify(obj || {})); } catch { return {}; } }
 if (DBG_BOD) {
   app.use((req, _res, next) => {
     if (req.path === "/assistant/ask" || req.path === "/send") {
@@ -71,8 +89,8 @@ if (DBG_BOD) {
     next();
   });
 }
-function safeParseJson(s){ try { return JSON.parse(s); } catch { return {}; } }
-function bodyObj(req){ return typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}); }
+function safeParseJson(s) { try { return JSON.parse(s); } catch { return {}; } }
+function bodyObj(req)     { return typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}); }
 
 /* -------------------- OpenAI /v1/responses -------------------- */
 const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
@@ -82,17 +100,29 @@ const OA_HEADERS = {
   ...(USE_ASSISTANT ? { "OpenAI-Beta": "assistants=v2" } : {}), // only when using assistant_id
 };
 
+// Build a content block array
 function blocks(text) {
   return [{ role: "user", content: [{ type: "input_text", text: String(text ?? "") }] }];
 }
-function extractText(data) {
-  return data?.output_text ??
-    (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ?? "";
+
+// Attach vector stores (and file_search tool) to a payload
+function withKnowledge(payload) {
+  if (!VECTOR_STORE_IDS.length) return payload;
+  return {
+    ...payload,
+    tools: [{ type: "file_search" }],
+    tool_resources: {
+      file_search: { vector_store_ids: VECTOR_STORE_IDS },
+    },
+  };
 }
+
+// Friendly header log
 function headersForLog(h) {
   const mask = h.Authorization ? `Bearer ${h.Authorization.slice(7, 11)}…` : "(missing)";
   return { "Content-Type": h["Content-Type"], "OpenAI-Beta": h["OpenAI-Beta"], Authorization: mask };
 }
+
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -116,7 +146,7 @@ async function callResponses(body, { timeoutMs = 45_000 } = {}) {
 }
 
 /* -------------------- Thread State -------------------- */
-// Only used when USE_ASSISTANT_ID=true (Responses threading)
+// We persist the last response.id per thread for multi-turn continuity.
 const lastResponseIdByThread = new Map();
 
 /* -------------------- Routes -------------------- */
@@ -131,6 +161,7 @@ app.get("/health", (_req, res) => {
     env: {
       OPENAI_API_KEY: "set",
       OPENAI_MODEL: DEFAULT_MODEL,
+      VECTOR_STORE_IDS: VECTOR_STORE_IDS,
       USE_ASSISTANT_ID: USE_ASSISTANT,
       ASST_DEFAULT: USE_ASSISTANT ? (ASST_DEFAULT ? "set" : "missing") : "(not used)",
       DEBUG: { DEBUG_LOG_REQUESTS: DBG_REQ, DEBUG_LOG_BODIES: DBG_BOD, DEBUG_OPENAI: DBG_OA },
@@ -151,18 +182,23 @@ app.post("/assistant/ask", async (req, res) => {
     const userText = (typeof message === "string" && message) || (typeof text === "string" && text) || "";
     if (!userText) return res.status(400).json({ ok: false, error: "Field 'message' (or 'text') is required" });
 
-    const payload = {
-      model: model || DEFAULT_MODEL,      // required
+    const prior = providedThread ? lastResponseIdByThread.get(providedThread) : undefined;
+
+    const payload = withKnowledge({
+      model: model || DEFAULT_MODEL,                       // required
+      instructions: ASST_INSTRUCTIONS,                     // global purpose
       input: blocks(userText),
-      ...(USE_ASSISTANT ? { assistant_id: ASST_DEFAULT, store: true } : {}),
-    };
+      store: true,                                         // store for continuity
+      ...(prior ? { previous_response_id: prior } : {}),   // continue if known
+      ...(USE_ASSISTANT ? { assistant_id: ASST_DEFAULT } : {}),
+    });
 
     const data = await callResponses(payload);
-    const answer = extractText(data);
+    const answer = data?.output_text ??
+      (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ?? "";
 
-    if (USE_ASSISTANT && providedThread && typeof providedThread === "string" && data?.id) {
-      lastResponseIdByThread.set(providedThread, data.id);
-    }
+    if (providedThread && data?.id) lastResponseIdByThread.set(providedThread, data.id);
+
     return res.json({ ok: true, answer, data_id: data?.id ?? null });
   } catch (e) {
     return res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
@@ -180,29 +216,30 @@ app.post("/send", async (req, res) => {
     if (!conv)     return res.status(400).json({ ok: false, error: "Field 'thread_id' (or 'thread') is required" });
     if (!userText) return res.status(400).json({ ok: false, error: "Field 'text' (or 'message') is required" });
 
-    const prior = USE_ASSISTANT ? lastResponseIdByThread.get(conv) : undefined;
+    const prior = lastResponseIdByThread.get(conv);
 
-    const payload = {
-      model: model || DEFAULT_MODEL,      // required
+    const payload = withKnowledge({
+      model: model || DEFAULT_MODEL,
+      instructions: ASST_INSTRUCTIONS,
       input: blocks(userText),
-      ...(USE_ASSISTANT ? {
-        assistant_id: ASST_DEFAULT,
-        store: true,
-        ...(prior ? { previous_response_id: prior } : {}),
-      } : {}),
-    };
+      store: true,
+      ...(prior ? { previous_response_id: prior } : {}),
+      ...(USE_ASSISTANT ? { assistant_id: ASST_DEFAULT } : {}),
+    });
 
     const data = await callResponses(payload);
-    if (USE_ASSISTANT && data?.id) lastResponseIdByThread.set(conv, data.id);
+    if (data?.id) lastResponseIdByThread.set(conv, data.id);
 
-    const msg = extractText(data);
+    const msg = data?.output_text ??
+      (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ?? "";
+
     return res.json({ ok: true, message: msg, data_id: data?.id ?? null });
   } catch (e) {
     return res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
   }
 });
 
-/* ----- Dev token ----- */
+/* ----- Dev token (optional) ----- */
 app.post("/dev/make-token", (req, res) => {
   try {
     if (!on(process.env.DEV_TOKEN_ENABLED)) return res.status(403).json({ ok: false, error: "Disabled" });
