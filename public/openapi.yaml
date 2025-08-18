@@ -1,0 +1,40 @@
+openapi: 3.0.1
+info:
+  title: Metamorphosis Assistant API
+  version: '1.0.0'
+  description: API for chatting with the Metamorphosis Assistant.
+servers:
+  - url: http://localhost:10000
+paths:
+  /start-chat:
+    get:
+      summary: Start a new chat thread.
+      parameters:
+        - in: query
+          name: token
+          required: true
+          schema:
+            type: string
+          description: JWT token for authentication.
+      responses:
+        '200':
+          description: Chat thread created.
+  /send:
+    post:
+      summary: Send a message to a chat thread.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                thread_id:
+                  type: string
+                text:
+                  type: string
+                model:
+                  type: string
+      responses:
+        '200':
+          description: Assistant response.

@@ -81,7 +81,7 @@ app.use((req, _res, next) => {
 
 const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
 const ASST_DEFAULT = requireEnv("ASST_DEFAULT");
-const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
 // ---------- OpenAI Client (Responses API) ----------
 const OA_URL = "https://api.openai.com/v1/responses";
@@ -307,7 +307,7 @@ app.post("/chat", async (_req, res) => {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "gpt-4.1-mini",
         messages: [{ role: "user", content: "Hello" }],
       }),
     });
