@@ -92,8 +92,8 @@ const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.co
 const OA_HEADERS = {
   Authorization: `Bearer ${OPENAI_API_KEY}`,
   "Content-Type": "application/json",
-  // REQUIRED when using assistant_id with /v1/responses
-  "OpenAI-Beta": "assistants=v2",
+  // Enable assistant_id and other responses features
+  "OpenAI-Beta": "assistants=v2, responses=v1",
 };
 
 function blocks(text) {
