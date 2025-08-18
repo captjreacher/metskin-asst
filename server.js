@@ -1,257 +1,335 @@
-// server.js — API server for Metamorphosis Assistant
-import { spawn } from "node:child_process";
+/**
+ * Metamorphosis Assistant — API Server (Full Rewrite)
+ * ---------------------------------------------------
+ * - Express ESM server with strict input validation
+ * - Centralized OpenAI /v1/responses caller (assistants=v2)
+ * - ALWAYS sends content as blocks: [{ type:"text", text: "..." }]
+ * - Thread support (conversation id)
+ * - Health endpoints, dev token, admin Notion sync hook
+ * - Helpful debug toggles: DEBUG_OPENAI, DEBUG_LOG_REQUESTS
+ */
+
 import express from "express";
 import dotenv from "dotenv";
-import jwt from "jsonwebtoken";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import jwt from "jsonwebtoken";
+import { spawn } from "node:child_process";
+// If you're on Node ≥18 you can use global fetch; keeping node-fetch for portability.
 import fetch from "node-fetch";
 dotenv.config();
 
+// ---------- Paths / App ----------
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-app.use(express.json());
+
+// ---------- Basic Middlewares ----------
+app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-// Default model used for OpenAI Responses API
+if (process.env.DEBUG_LOG_REQUESTS === "1") {
+  app.use((req, _res, next) => {
+    console.log(`[REQ] ${req.method} ${req.url}`);
+    next();
+  });
+}
+
+// ---------- Config Helpers ----------
+const REQUIRED_AT_START = ["OPENAI_API_KEY", "ASST_DEFAULT"];
+function requireEnv(name) {
+  const v = process.env[name];
+  if (!v || String(v).trim() === "") {
+    throw new Error(`Missing required env: ${name}`);
+  }
+  return v;
+}
+function boolEnv(name, def = false) {
+  const v = process.env[name];
+  if (v == null) return def;
+  return ["1", "true", "yes", "on"].includes(String(v).toLowerCase());
+}
+
+const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
+const ASST_DEFAULT = requireEnv("ASST_DEFAULT");
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+// ---------- OpenAI Client (Responses API) ----------
+const OA_URL = "https://api.openai.com/v1/responses";
+const OA_HEADERS = {
+  Authorization: `Bearer ${OPENAI_API_KEY}`,
+  "Content-Type": "application/json",
+  "OpenAI-Beta": "assistants=v2",
+};
+
+function contentBlocks(text) {
+  // Always send blocks (the core fix for the “Unknown parameter: ''” error)
+  return [{ role: "user", content: [{ type: "text", text: String(text ?? "") }] }];
+}
+
+function extractOutputText(data) {
+  // Prefer output_text; fall back to walking the first output item
+  return (
+    data?.output_text ??
+    (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ??
+    ""
+  );
+}
+
+async function callOpenAI(body, { timeoutMs = 45_000 } = {}) {
+  const debug = boolEnv("DEBUG_OPENAI");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  const req = {
+    method: "POST",
+    headers: OA_HEADERS,
+    body: JSON.stringify(body),
+    signal: controller.signal,
+  };
+
+  if (debug) console.log(`[OA⇢] ${OA_URL}\n${JSON.stringify(body, null, 2)}`);
+
+  let resp;
+  let raw;
+  try {
+    resp = await fetch(OA_URL, req);
+    raw = await resp.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (debug) console.log(`[OA⇠] HTTP ${resp?.status}\n${raw}`);
+
+  // Try parse; if it fails, wrap the raw as error text
+  let json;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    json = { error: { message: raw || "Non-JSON response from OpenAI" } };
+  }
+
+  if (!resp.ok) {
+    const msg =
+      json?.error?.message ||
+      json?.message ||
+      `OpenAI error (HTTP ${resp.status})`;
+    const err = new Error(msg);
+    err.status = resp.status;
+    err.data = json;
+    throw err;
+  }
+
+  return json;
+}
+
+// ---------- Small Utilities ----------
+function badRequest(res, msg, details) {
+  return res.status(400).json({ ok: false, error: msg, details: details ?? null });
+}
+function internalError(res, msg, details) {
+  return res.status(500).json({ ok: false, error: msg, details: details ?? null });
+}
 
 // ---------- Health ----------
 const health = {
   ok: true,
-  env: {
-    assistant: process.env.ASST_DEFAULT || null,
-    vector_store: process.env.VS_DEFAULT || null
-  },
   routes: [
-    "GET  /                (UI)",
-    "POST /assistant/ask   (Responses API via assistant_id)",
+    "GET  /",
+    "GET  /health",
+    "GET  /healthz",
     "GET  /start-chat",
+    "POST /assistant/ask",
     "POST /send",
     "POST /dev/make-token",
-    "POST /chat            (Chat Completions test)",
-    "GET  /health",
-    "GET  /healthz"
-  ]
+    "POST /chat                 (Chat Completions test)",
+    "POST /admin/sync-knowledge (spawns Notion→Vector sync)",
+  ],
+  env: {
+    OPENAI_MODEL: DEFAULT_MODEL,
+    ASST_DEFAULT: ASST_DEFAULT ? "set" : "missing",
+    OPENAI_API_KEY: OPENAI_API_KEY ? "set" : "missing",
+    ADMIN_API_TOKEN: process.env.ADMIN_API_TOKEN ? "set" : "unset",
+    DEV_TOKEN_ENABLED: process.env.DEV_TOKEN_ENABLED || "false",
+  },
 };
-app.get("/health",  (_req, res) => res.json(health));
-app.get("/healthz", (_req, res) => res.json(health));
+app.get("/health", (_req, res) => res.json(health));
+app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
 // ---------- UI ----------
 app.get("/", (_req, res) =>
   res.sendFile(path.join(__dirname, "public", "index.html"))
 );
 
-// ---------- Assistant endpoint (Responses API via assistant_id) ----------
+// ---------- Conversation Helpers ----------
+app.get("/start-chat", (_req, res) => {
+  const thread_id = crypto.randomUUID(); // You can store this if needed
+  res.json({ ok: true, thread_id });
+});
+
+// ---------- Assistant: New thread ask ----------
 app.post("/assistant/ask", async (req, res) => {
   try {
     const { message, model } = req.body ?? {};
     if (!message || typeof message !== "string") {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Field 'message' is required" });
-    }
-    const { OPENAI_API_KEY, ASST_DEFAULT } = process.env;
-    if (!OPENAI_API_KEY)
-      return res.status(500).json({ ok: false, error: "OPENAI_API_KEY missing" });
-    if (!ASST_DEFAULT)
-      return res
-        .status(500)
-        .json({ ok: false, error: "ASST_DEFAULT missing (assistant id)" });
-
-    const r = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-        "OpenAI-Beta": "assistants=v2",
-      },
-      body: JSON.stringify({
-        assistant_id: ASST_DEFAULT,
-        model: model || DEFAULT_MODEL,
-        input: [
-          {
-            role: "user",
-            content: [{ type: "text", text: message }],
-          },
-        ],
-      }),
-    });
-
-    const data = await r.json();
-    if (!r.ok) {
-      const msg =
-        (data && (data.error?.message || data.message)) || "OpenAI error";
-      return res.status(r.status).json({ ok: false, error: msg });
+      return badRequest(res, "Field 'message' (string) is required");
     }
 
-    const answer =
-      data.output_text ??
-      (Array.isArray(data.output) && data.output[0]?.content?.[0]?.text) ??
-      "";
+    const body = {
+      assistant_id: ASST_DEFAULT,
+      model: model || DEFAULT_MODEL, // optional with assistant_id, but allowed
+      input: contentBlocks(message),
+    };
 
-    return res.json({ ok: true, answer });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
+    const data = await callOpenAI(body);
+    const answer = extractOutputText(data);
+
+    return res.json({ ok: true, answer, data_id: data?.id ?? null });
+  } catch (e) {
+    return res
+      .status(e.status || 500)
+      .json({ ok: false, error: e.message, details: e.data ?? null });
   }
 });
 
-// ---------- Start chat (creates conversation id) ----------
-app.get("/start-chat", (_req, res) => {
-  // Conversation ids can be arbitrary strings. Generate a UUID to track a chat.
-  const thread_id = crypto.randomUUID();
-  res.json({ ok: true, thread_id });
-});
-
-// ---------- Send message on existing thread ----------
+// ---------- Assistant: Send to existing conversation ----------
 app.post("/send", async (req, res) => {
   try {
     const { thread_id, text, model } = req.body ?? {};
-    if (!thread_id || !text) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Fields 'thread_id' and 'text' are required" });
+    if (!thread_id || typeof thread_id !== "string") {
+      return badRequest(res, "Field 'thread_id' (string) is required");
     }
-    const { OPENAI_API_KEY, ASST_DEFAULT } = process.env;
-    if (!OPENAI_API_KEY)
-      return res
-        .status(500)
-        .json({ ok: false, error: "OPENAI_API_KEY missing" });
-    if (!ASST_DEFAULT)
-      return res
-        .status(500)
-        .json({ ok: false, error: "ASST_DEFAULT missing (assistant id)" });
+    if (!text || typeof text !== "string") {
+      return badRequest(res, "Field 'text' (string) is required");
+    }
 
-    const r = await fetch("https://api.openai.com/v1/responses", {
+    const body = {
+      conversation: thread_id,
+      assistant_id: ASST_DEFAULT,
+      model: model || DEFAULT_MODEL,
+      input: contentBlocks(text),
+    };
+
+    const data = await callOpenAI(body);
+    const message = extractOutputText(data);
+
+    return res.json({ ok: true, message, data_id: data?.id ?? null });
+  } catch (e) {
+    return res
+      .status(e.status || 500)
+      .json({ ok: false, error: e.message, details: e.data ?? null });
+  }
+});
+
+// ---------- Dev: Make short-lived JWT for local testing ----------
+app.post("/dev/make-token", (req, res) => {
+  try {
+    if (!boolEnv("DEV_TOKEN_ENABLED")) {
+      return res.status(403).json({ ok: false, error: "Disabled" });
+    }
+    const { email, name = "Guest", campaign = "dev" } = req.body ?? {};
+    if (!email || typeof email !== "string") {
+      return badRequest(res, "Field 'email' (string) is required");
+    }
+    const secret = process.env.JWT_SECRET;
+    if (!secret) return internalError(res, "JWT_SECRET missing");
+
+    const token = jwt.sign({ email, name, campaign }, secret, {
+      expiresIn: "1h",
+    });
+    res.json({ ok: true, token });
+  } catch (e) {
+    return internalError(res, e.message);
+  }
+});
+
+// ---------- Optional: Chat Completions probe ----------
+app.post("/chat", async (_req, res) => {
+  try {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
-        "OpenAI-Beta": "assistants=v2",
       },
       body: JSON.stringify({
-        conversation: thread_id,
-        assistant_id: ASST_DEFAULT,
-        model: model || DEFAULT_MODEL,
-        input: [
-          {
-            role: "user",
-            content: [{ type: "text", text }],
-          },
-        ],
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: "Hello" }],
       }),
     });
-
     const data = await r.json();
     if (!r.ok) {
       return res
         .status(r.status)
         .json({ ok: false, error: data?.error?.message || "OpenAI error" });
     }
-
-    const message =
-      data.output_text ||
-      (Array.isArray(data.output) && data.output[0]?.content?.[0]?.text) ||
-      "";
-
-    res.json({ ok: true, message });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// ---------- Dev token generator ----------
-app.post("/dev/make-token", (req, res) => {
-  const { DEV_TOKEN_ENABLED, JWT_SECRET } = process.env;
-  if (DEV_TOKEN_ENABLED !== "true") {
-    return res.status(403).json({ ok: false, error: "Disabled" });
-  }
-  const { email, name = "Guest", campaign = "dev" } = req.body ?? {};
-  if (!email) {
-    return res.status(400).json({ ok: false, error: "email required" });
-  }
-  if (!JWT_SECRET) {
-    return res.status(500).json({ ok: false, error: "JWT_SECRET missing" });
-  }
-  const token = jwt.sign({ email, name, campaign }, JWT_SECRET, {
-    expiresIn: "1h",
-  });
-  res.json({ ok: true, token });
-});
-
-// ---------- Chat Completions test endpoint (raw fetch) ----------
-app.post("/chat", async (req, res) => {
-  try {
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4-turbo",
-        messages: [{ role: "user", content: "Hello" }]
-      })
+    res.json({
+      ok: true,
+      answer: data?.choices?.[0]?.message?.content ?? "",
     });
-
-    const data = await r.json();
-    if (!r.ok) {
-      return res.status(r.status).json({ ok:false, error: data?.error?.message || "OpenAI error" });
-    }
-
-    const answer = data.choices?.[0]?.message?.content ?? "";
-    res.json({ ok:true, answer });
-  } catch (err) {
-    res.status(500).json({ ok:false, error: err.message });
+  } catch (e) {
+    return internalError(res, e.message);
   }
 });
 
-// --- Admin: trigger Notion → Vector Store sync on demand ---
-// Auth: Authorization: Bearer <ADMIN_API_TOKEN or JWT_SECRET>
+// ---------- Admin: trigger Notion → Vector Store sync ----------
 app.post("/admin/sync-knowledge", async (req, res) => {
   const header = req.headers["authorization"] || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-
-  const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;   // if present, preferred
-  const JWT_SECRET      = process.env.JWT_SECRET;        // fallback
-  const expected = ADMIN_API_TOKEN || JWT_SECRET;
+  const expected = process.env.ADMIN_API_TOKEN || process.env.JWT_SECRET;
 
   if (!expected) {
-    return res.status(503).json({ ok: false, error: "Sync admin route disabled (no ADMIN_API_TOKEN or JWT_SECRET set)" });
+    return res.status(503).json({
+      ok: false,
+      error:
+        "Sync disabled: set ADMIN_API_TOKEN or JWT_SECRET to authorize this route",
+    });
   }
   if (!token || token !== expected) {
     return res.status(401).json({ ok: false, error: "Unauthorized" });
   }
 
-  // spawn a one-shot sync: node scripts/sync_knowledge_from_notion_files.mjs
-  const child = spawn(process.execPath, ["scripts/sync_knowledge_from_notion_files.mjs"], {
+  // Adjust script path if your script has a different filename
+  const scriptPath = path.join(
+    __dirname,
+    "scripts",
+    "sync_knowledge_from_notion_files.mjs"
+  );
+
+  const child = spawn(process.execPath, [scriptPath], {
     env: process.env,
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
   });
 
-  let out = "";
-  let err = "";
-  child.stdout.on("data", (d) => { out += d.toString(); });
-  child.stderr.on("data", (d) => { err += d.toString(); });
-
-  child.on("error", (e) => {
-    return res.status(500).json({ ok: false, error: `spawn error: ${e.message}` });
-  });
-
-  child.on("close", (code) => {
-    const ok = code === 0;
-    return res.status(ok ? 200 : 500).json({
-      ok,
-      code,
-      stdout: out.trim(),
-      stderr: err.trim()
-    });
-  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d) => (stdout += d.toString()));
+  child.stderr.on("data", (d) => (stderr += d.toString()));
+  child.on("error", (err) =>
+    res.status(500).json({ ok: false, error: `spawn error: ${err.message}` })
+  );
+  child.on("close", (code) =>
+    res
+      .status(code === 0 ? 200 : 500)
+      .json({ ok: code === 0, code, stdout: stdout.trim(), stderr: stderr.trim() })
+  );
 });
 
-// ---------- Start ----------
-const PORT = process.env.PORT || 10000;     // Render provides PORT; local can use .env PORT
+// ---------- Fallback 404 ----------
+app.use((_req, res) => {
+  res.status(404).json({ ok: false, error: "Not Found" });
+});
+
+// ---------- Start Server ----------
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`Assistant ready on http://localhost:${PORT}`);
+  console.log(
+    `✓ Assistant server listening on http://localhost:${PORT}  (model=${DEFAULT_MODEL})`
+  );
+  // Sanity check at boot for required keys:
+  for (const k of REQUIRED_AT_START) {
+    if (!process.env[k]) {
+      console.warn(`! Warning: ${k} is not set`);
+    }
+  }
 });
