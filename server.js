@@ -113,7 +113,7 @@ async function notionUpdateBySampleId({ sample_id, order_status, sent_by }) {
     method: 'POST',
     headers: NOTION_H,
     body: JSON.stringify({
-      filter: { property: 'Sample_id', title: { equals: sample_id } },
+      filter: { property: 'sample_id', title: { equals: sample_id } },
       page_size: 1,
     }),
   });
@@ -124,10 +124,10 @@ async function notionUpdateBySampleId({ sample_id, order_status, sent_by }) {
   if (!page) throw new Error(`sample_id "${sample_id}" not found`);
 
   const props = {
-    // Order_status is rich_text (NOT select)
-    'Order_status': { rich_text: [{ text: { content: String(order_status || '') } }] },
-    'Date_sent':    { date: { start: nowIso() } },
-    'Sent_by':      { rich_text: [{ text: { content: String(sent_by || '') } }] },
+    // order_status is rich_text (NOT select)
+    'order_status': { rich_text: [{ text: { content: String(order_status || '') } }] },
+    'date_sent':    { date: { start: nowIso() } },
+    'sent_by':      { rich_text: [{ text: { content: String(sent_by || '') } }] },
   };
 
   const u = await fetch(`https://api.notion.com/v1/pages/${page.id}`, {
