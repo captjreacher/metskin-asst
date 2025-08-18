@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
 import path from "path";
 import { fileURLToPath } from "url";
+import crypto from "crypto";
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -89,28 +90,11 @@ app.get("/", (_req, res) =>
   }
   });
 
-// ---------- Start chat (creates thread) ----------
-app.get("/start-chat", async (_req, res) => {
-  try {
-    const r = await fetch("https://api.openai.com/v1/threads", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-        "OpenAI-Beta": "assistants=v2",
-      },
-      body: "{}",
-    });
-    const data = await r.json();
-    if (!r.ok) {
-      return res
-        .status(r.status)
-        .json({ ok: false, error: data?.error?.message || "OpenAI error" });
-    }
-    res.json({ ok: true, thread_id: data.id });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
+// ---------- Start chat (creates conversation id) ----------
+app.get("/start-chat", (_req, res) => {
+  // Conversation ids can be arbitrary strings. Generate a UUID to track a chat.
+  const thread_id = crypto.randomUUID();
+  res.json({ ok: true, thread_id });
 });
 
 // ---------- Send message on existing thread ----------
@@ -140,7 +124,7 @@ app.post("/send", async (req, res) => {
         "OpenAI-Beta": "assistants=v2",
       },
       body: JSON.stringify({
-        thread_id,
+        conversation: thread_id,
         assistant_id: ASST_DEFAULT,
         model: model || DEFAULT_MODEL,
         input: [{ role: "user", content: text }],
