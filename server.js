@@ -37,9 +37,13 @@ function requireEnv(name) {
   return v;
 }
 
-const OPENAI_API_KEY    = requireEnv("OPENAI_API_KEY");
-const ASST_INSTRUCTIONS = requireEnv("ASST_DEFAULT");
-const DEFAULT_MODEL     = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
+// Assistant configuration
+// ASST_DEFAULT: OpenAI assistant ID (required)
+// ASST_INSTRUCTIONS: optional override/extra instructions
+const ASST_ID = requireEnv("ASST_DEFAULT");
+const ASST_INSTRUCTIONS = process.env.ASST_INSTRUCTIONS || "";
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
 /* -------------------- Parsers & Error Handling -------------------- */
 app.use(express.json({ limit: "1mb" }));
@@ -197,7 +201,8 @@ app.post("/assistant/ask", async (req, res) => {
       store: true,
       model: model || DEFAULT_MODEL,   // required by /v1/responses
       input: blocks(userText),
-      instructions: ASST_INSTRUCTIONS,
+      assistant_id: ASST_ID,
+      ...(ASST_INSTRUCTIONS ? { instructions: ASST_INSTRUCTIONS } : {}),
     };
 
     const data = await callResponses(payload);
@@ -236,7 +241,8 @@ app.post("/send", async (req, res) => {
       ...(prior ? { previous_response_id: prior } : {}),
       model: model || DEFAULT_MODEL,   // required
       input: blocks(userText),
-      instructions: ASST_INSTRUCTIONS,
+      assistant_id: ASST_ID,
+      ...(ASST_INSTRUCTIONS ? { instructions: ASST_INSTRUCTIONS } : {}),
     };
 
     const data = await callResponses(payload);
