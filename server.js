@@ -1,13 +1,13 @@
 /**
- * Metamorphosis Assistant — API Server (Final Rewrite)
- * ----------------------------------------------------
- * - Correct /v1/responses shape (content blocks; no 'conversation')
+ * Metamorphosis Assistant — API Server (full rewrite)
+ * ---------------------------------------------------
+ * - Correct /v1/responses usage (content blocks; no 'conversation')
  * - Threading via { store: true, previous_response_id }
- * - Requires 'model' (uses DEFAULT_MODEL unless caller overrides)
- * - Accepts JSON or raw text bodies for /assistant/ask and /send
- * - JSON parse errors return JSON (not HTML)
- * - Deep debug toggles: DEBUG_LOG_REQUESTS, DEBUG_LOG_BODIES, DEBUG_OPENAI
- * - Health endpoints, static UI, dev token, admin sync hook
+ * - 'model' is required → uses DEFAULT_MODEL unless caller overrides
+ * - Accepts JSON or raw text for /assistant/ask and /send
+ * - Returns JSON on parse errors (no HTML "Bad Request")
+ * - Deep logging via DEBUG_LOG_REQUESTS, DEBUG_LOG_BODIES, DEBUG_OPENAI
+ * - Health endpoints, static UI, dev token, admin sync
  */
 
 import express from "express";
@@ -17,12 +17,11 @@ import { fileURLToPath } from "url";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { spawn } from "node:child_process";
-// If on Node ≥18 you can rely on global fetch; node-fetch keeps portability.
 import fetch from "node-fetch";
 
 dotenv.config();
 
-/* -------------------- App & Debug -------------------- */
+/* -------------------- App / Debug -------------------- */
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 
@@ -45,7 +44,7 @@ const DEFAULT_MODEL  = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 /* -------------------- Parsers & Error Handling -------------------- */
 app.use(express.json({ limit: "1mb" }));
 
-// Return JSON (not HTML) on JSON parse errors
+// Return JSON (not HTML) when JSON parsing fails
 app.use((err, _req, res, next) => {
   if (err && err.type === "entity.parse.failed") {
     return res.status(400).json({
@@ -57,10 +56,10 @@ app.use((err, _req, res, next) => {
   next(err);
 });
 
-// Accept raw text for these routes (helps with curl/PowerShell quirks)
+// Also accept raw text for these routes (helps with curl/PowerShell quirks)
 app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
 
-// Static UI
+// Static assets (UI)
 app.use(express.static(path.join(__dirname, "public")));
 
 // Request logger
@@ -81,20 +80,17 @@ if (DBG_BOD) {
     next();
   });
 }
-
-// Convenience for reading a body that might be JSON or text
 function safeParseJson(s) { try { return JSON.parse(s); } catch { return {}; } }
-function bodyObj(req) {
-  return typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {});
-}
+function bodyObj(req) { return typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}); }
 
 /* -------------------- OpenAI /v1/responses -------------------- */
+const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
 const OA_HEADERS = {
-  Authorization: `Bearer ${OPENAI_API_KEY}`,   // <— backticks here
+  Authorization: `Bearer ${OPENAI_API_KEY}`,
   "Content-Type": "application/json",
-  "OpenAI-Beta": "assistants=v2",              // required with assistant_id
+  // REQUIRED when using assistant_id with /v1/responses
+  "OpenAI-Beta": "assistants=v2",
 };
-
 
 function blocks(text) {
   return [{ role: "user", content: [{ type: "text", text: String(text ?? "") }] }];
@@ -106,29 +102,41 @@ function extractText(data) {
     ""
   );
 }
+function headersForLog(h) {
+  const mask = h.Authorization ? `Bearer ${h.Authorization.slice(7, 11)}…` : "(missing)";
+  return { "Content-Type": h["Content-Type"], "OpenAI-Beta": h["OpenAI-Beta"], Authorization: mask };
+}
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const req = { method: "POST", headers: OA_HEADERS, body: JSON.stringify(body), signal: controller.signal };
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  if (DBG_OA) console.log(`[OA⇢] ${OA_URL}\n${JSON.stringify(body, null, 2)}`);
+  const req = {
+    method: "POST",
+    headers: OA_HEADERS,
+    body: JSON.stringify(body),
+    signal: controller.signal,
+  };
+
+  if (DBG_OA) {
+    console.log("[OA HEADERS]", headersForLog(OA_HEADERS));
+    console.log("[OA⇢]", RESPONSES_URL, "\n" + JSON.stringify(body, null, 2));
+  }
 
   let resp, raw;
   try {
-    resp = await fetch(OA_URL, req);
+    resp = await fetch(RESPONSES_URL, req);
     raw = await resp.text();
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timer);
   }
 
-  if (DBG_OA) console.log(`[OA⇠] HTTP ${resp?.status}\n${raw}`);
+  if (DBG_OA) console.log("[OA⇠] HTTP", resp?.status, "\n" + raw);
 
   let json;
   try { json = JSON.parse(raw); } catch { json = { error: { message: raw || "Non-JSON response from OpenAI" } }; }
 
   if (!resp.ok) {
-    const msg = json?.error?.message || json?.message || `OpenAI error (HTTP ${resp.status})`;
-    const err = new Error(msg);
+    const err = new Error(json?.error?.message || json?.message || `OpenAI error (HTTP ${resp.status})`);
     err.status = resp.status;
     err.data = json;
     throw err;
@@ -137,7 +145,7 @@ async function callResponses(body, { timeoutMs = 45_000 } = {}) {
 }
 
 /* -------------------- Thread state (in-memory) -------------------- */
-// Map front-end thread_id (UUID) -> last OpenAI response.id
+// Map: your UI's thread_id (UUID) -> last OpenAI response.id
 const lastResponseIdByThread = new Map();
 
 /* -------------------- Routes -------------------- */
@@ -195,7 +203,6 @@ app.post("/assistant/ask", async (req, res) => {
     const data = await callResponses(payload);
     const answer = extractText(data);
 
-    // If a thread_id was provided, associate it with this first response
     if (providedThread && typeof providedThread === "string" && data?.id) {
       lastResponseIdByThread.set(providedThread, data.id);
     }
@@ -269,18 +276,11 @@ app.post("/chat", async (_req, res) => {
   try {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: "Hello" }],
-      }),
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: "Hello" }] }),
     });
     const data = await r.json();
     if (!r.ok) return res.status(r.status).json({ ok: false, error: data?.error?.message || "OpenAI error" });
-
     res.json({ ok: true, answer: data?.choices?.[0]?.message?.content ?? "" });
   } catch (e) {
     return res.status(500).json({ ok: false, error: e.message });
