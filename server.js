@@ -1,91 +1,18 @@
-// server.js — Assistant (Responses API via assistant_id) + Chat Completions test + UI
+// server.js — API server for Metamorphosis Assistant
 import express from "express";
 import dotenv from "dotenv";
+import jwt from "jsonwebtoken";
+import path from "path";
+import { fileURLToPath } from "url";
 dotenv.config();
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));
 
-// ---------- Inlined UI (mirrors your index.html look) ----------
-const page = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Metamorphosis Assistant</title>
-<style>
-  :root { color-scheme: dark }
-  * { box-sizing: border-box }
-  body { margin:0; font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:#0b0b0c; color:#e9e9ea }
-  header { padding:14px 18px; border-bottom:1px solid #24242a; background:#121217 }
-  main { max-width:960px; margin:22px auto; padding:0 16px }
-  .panel { border:1px solid #252a33; border-radius:12px; background:#0f1117; padding:14px; min-height:220px; max-height:60vh; overflow:auto }
-  .messages { display:flex; flex-direction:column; gap:10px }
-  .bubble { padding:10px 12px; border-radius:12px; max-width:86%; word-wrap:break-word; white-space:pre-wrap }
-  .bubble.user { align-self:flex-end; background:#22577a; color:#e9f1f6 }
-  .bubble.assistant { align-self:flex-start; background:#1f2937; color:#f1f5f9 }
-  .bubble.system { align-self:center; background:#101316; color:#9aa1a8; border:1px dashed #2a313c }
-  form { margin-top:14px; display:flex; gap:10px }
-  input { flex:1; padding:12px 14px; border-radius:10px; border:1px solid #2e2e36; background:#0d0d12; color:#e9e9ea }
-  button { padding:12px 16px; border-radius:10px; border:1px solid #3940ff33; background:#1f37ff; color:#fff; cursor:pointer }
-  button:disabled { opacity:.6; cursor:not-allowed }
-</style>
-</head>
-<body>
-<header><strong>Metamorphosis Assistant</strong></header>
-<main>
-  <div class="panel">
-    <div id="msgs" class="messages">
-      <div class="bubble system">Assistant ready. Ask me anything.</div>
-    </div>
-  </div>
-
-  <form id="f">
-    <input id="q" placeholder="Type your question…" autocomplete="off"/>
-    <button id="send">Ask</button>
-  </form>
-</main>
-
-<script>
-  const msgs = document.getElementById('msgs');
-  const form = document.getElementById('f');
-  const input = document.getElementById('q');
-  const btn = document.getElementById('send');
-
-  function add(role, text) {
-    const div = document.createElement('div');
-    div.className = 'bubble ' + role;
-    div.textContent = text;
-    msgs.appendChild(div);
-    msgs.parentElement.scrollTop = msgs.parentElement.scrollHeight;
-  }
-
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const message = input.value.trim();
-    if (!message) return;
-
-    add('user', message);
-    input.value=''; btn.disabled = true;
-
-    try {
-      const r = await fetch('/assistant/ask', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message })
-      });
-      const j = await r.json();
-      if (!r.ok || !j.ok) throw new Error(j.error || 'Request failed');
-      add('assistant', j.answer || '(no answer)');
-    } catch (err) {
-      add('assistant', err.message);
-    } finally {
-      btn.disabled = false;
-    }
-  });
-</script>
-</body>
-</html>`;
+// Default model used for OpenAI Responses API
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 // ---------- Health ----------
 const health = {
@@ -95,10 +22,12 @@ const health = {
     vector_store: process.env.VS_DEFAULT || null
   },
   routes: [
-    "GET  /  (UI)",
-    "GET  /assistant  (UI)",
-    "POST /assistant/ask  (Responses API via assistant_id)",
-    "POST /chat         (Chat Completions test)",
+    "GET  /                (UI)",
+    "POST /assistant/ask   (Responses API via assistant_id)",
+    "GET  /start-chat",
+    "POST /send",
+    "POST /dev/make-token",
+    "POST /chat            (Chat Completions test)",
     "GET  /health",
     "GET  /healthz"
   ]
@@ -107,36 +36,45 @@ app.get("/health",  (_req, res) => res.json(health));
 app.get("/healthz", (_req, res) => res.json(health));
 
 // ---------- UI ----------
-app.get("/",          (_req, res) => res.type("html").send(page));
-app.get("/assistant", (_req, res) => res.type("html").send(page));
+app.get("/", (_req, res) =>
+  res.sendFile(path.join(__dirname, "public", "index.html"))
+);
 
 // ---------- Assistant endpoint (Responses API via assistant_id) ----------
-app.post("/assistant/ask", async (req, res) => {
+  app.post("/assistant/ask", async (req, res) => {
   try {
-    const { message } = req.body ?? {};
+    const { message, model } = req.body ?? {};
     if (!message || typeof message !== "string") {
-      return res.status(400).json({ ok:false, error:"Field 'message' is required" });
+      return res
+        .status(400)
+        .json({ ok: false, error: "Field 'message' is required" });
     }
     const { OPENAI_API_KEY, ASST_DEFAULT } = process.env;
-    if (!OPENAI_API_KEY) return res.status(500).json({ ok:false, error:"OPENAI_API_KEY missing" });
-    if (!ASST_DEFAULT)   return res.status(500).json({ ok:false, error:"ASST_DEFAULT missing (assistant id)" });
+    if (!OPENAI_API_KEY)
+      return res.status(500).json({ ok: false, error: "OPENAI_API_KEY missing" });
+    if (!ASST_DEFAULT)
+      return res
+        .status(500)
+        .json({ ok: false, error: "ASST_DEFAULT missing (assistant id)" });
 
     const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        assistant_id: ASST_DEFAULT,                 // ← run your Assistant (uses its attached vector store)
-        input: [{ role: "user", content: message }] // no tools/tool_resources required here
-      })
+        assistant_id: ASST_DEFAULT,
+        model: model || DEFAULT_MODEL,
+        input: [{ role: "user", content: message }],
+      }),
     });
 
     const data = await r.json();
     if (!r.ok) {
-      const msg = (data && (data.error?.message || data.message)) || "OpenAI error";
-      return res.status(r.status).json({ ok:false, error: msg });
+      const msg =
+        (data && (data.error?.message || data.message)) || "OpenAI error";
+      return res.status(r.status).json({ ok: false, error: msg });
     }
 
     const answer =
@@ -144,10 +82,103 @@ app.post("/assistant/ask", async (req, res) => {
       (Array.isArray(data.output) && data.output[0]?.content?.[0]?.text) ??
       "";
 
-    return res.json({ ok:true, answer });
+    return res.json({ ok: true, answer });
   } catch (err) {
-    return res.status(500).json({ ok:false, error: err.message });
+    return res.status(500).json({ ok: false, error: err.message });
   }
+  });
+
+// ---------- Start chat (creates thread) ----------
+app.get("/start-chat", async (_req, res) => {
+  try {
+    const r = await fetch("https://api.openai.com/v1/threads", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      return res
+        .status(r.status)
+        .json({ ok: false, error: data?.error?.message || "OpenAI error" });
+    }
+    res.json({ ok: true, thread_id: data.id });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ---------- Send message on existing thread ----------
+app.post("/send", async (req, res) => {
+  try {
+    const { thread_id, text, model } = req.body ?? {};
+    if (!thread_id || !text) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "Fields 'thread_id' and 'text' are required" });
+    }
+    const { OPENAI_API_KEY, ASST_DEFAULT } = process.env;
+    if (!OPENAI_API_KEY)
+      return res
+        .status(500)
+        .json({ ok: false, error: "OPENAI_API_KEY missing" });
+    if (!ASST_DEFAULT)
+      return res
+        .status(500)
+        .json({ ok: false, error: "ASST_DEFAULT missing (assistant id)" });
+
+    const r = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        thread_id,
+        assistant_id: ASST_DEFAULT,
+        model: model || DEFAULT_MODEL,
+        input: [{ role: "user", content: text }],
+      }),
+    });
+
+    const data = await r.json();
+    if (!r.ok) {
+      return res
+        .status(r.status)
+        .json({ ok: false, error: data?.error?.message || "OpenAI error" });
+    }
+
+    const message =
+      data.output_text ||
+      (Array.isArray(data.output) && data.output[0]?.content?.[0]?.text) ||
+      "";
+
+    res.json({ ok: true, message });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ---------- Dev token generator ----------
+app.post("/dev/make-token", (req, res) => {
+  const { DEV_TOKEN_ENABLED, JWT_SECRET } = process.env;
+  if (DEV_TOKEN_ENABLED !== "true") {
+    return res.status(403).json({ ok: false, error: "Disabled" });
+  }
+  const { email, name = "Guest", campaign = "dev" } = req.body ?? {};
+  if (!email) {
+    return res.status(400).json({ ok: false, error: "email required" });
+  }
+  if (!JWT_SECRET) {
+    return res.status(500).json({ ok: false, error: "JWT_SECRET missing" });
+  }
+  const token = jwt.sign({ email, name, campaign }, JWT_SECRET, {
+    expiresIn: "1h",
+  });
+  res.json({ ok: true, token });
 });
 
 // ---------- Chat Completions test endpoint (raw fetch) ----------

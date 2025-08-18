@@ -12,7 +12,7 @@
     h2 { margin:0 0 8px; font-size:22px; }
     .card { background:var(--card); border:1px solid #232735; border-radius:12px; padding:16px; margin:12px 0; }
     label { display:block; margin:8px 0 4px; color:var(--muted); }
-    textarea, input { width:100%; padding:10px 12px; background:#0f1218; color:var(--text); border:1px solid #2a3040; border-radius:10px; }
+    textarea, input, select { width:100%; padding:10px 12px; background:#0f1218; color:var(--text); border:1px solid #2a3040; border-radius:10px; }
     textarea { min-height:80px; resize:vertical; }
     button { appearance:none; border:0; border-radius:10px; padding:10px 14px; background:#2b3346; color:var(--text); cursor:pointer; }
     button.primary { background:#39415a; }
@@ -60,6 +60,13 @@
     <div id="chatBox" class="card" style="display:none">
       <div class="row" style="justify-content:space-between;">
         <div><b>Thread:</b> <span id="threadId" class="muted">–</span></div>
+        <div>
+          <b>Model:</b>
+          <select id="model">
+            <option value="gpt-4o-mini" selected>gpt-4o-mini</option>
+            <option value="gpt-4o">gpt-4o</option>
+          </select>
+        </div>
         <div><b>Status:</b> <span id="ready" class="warn">connecting…</span></div>
       </div>
 
@@ -89,6 +96,7 @@
       const $threadId = document.getElementById("threadId");
       const $msgIn    = document.getElementById("msg");
       const $messages = document.getElementById("messages");
+      const $model    = document.getElementById("model");
 
       const qs = new URLSearchParams(location.search);
       let token = qs.get("token");
@@ -187,7 +195,7 @@
         const r = await fetch("/send", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ thread_id, text })
+          body: JSON.stringify({ thread_id, text, model: $model.value })
         });
         const j = await r.json().catch(() => ({}));
 
