@@ -101,13 +101,10 @@ const bodyObj = (req) => (typeof req.body === "string" ? safeParseJson(req.body)
 /* -------------------- OpenAI /v1/responses -------------------- */
 const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
 
-// Add the beta header whenever it's needed: using assistant_id OR vector stores/tools
-const NEED_BETA = USE_ASSISTANT || (VECTOR_STORE_IDS && VECTOR_STORE_IDS.length > 0);
-
 const OA_HEADERS = {
   Authorization: `Bearer ${OPENAI_API_KEY}`,
   "Content-Type": "application/json",
-  ...(NEED_BETA ? { "OpenAI-Beta": "assistants=v2" } : {}),
+  "OpenAI-Beta": "assistants=v2",
 };
 
 const headersForLog = (h) => ({
