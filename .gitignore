@@ -7,3 +7,8 @@ Thumbs.db
 /executables/sync-knowledge-remote.cmd
 /.env
 sync-knowledge-remote.cmd
+# Environment files
+.env
+.env.*
+*.env
+.env.local
