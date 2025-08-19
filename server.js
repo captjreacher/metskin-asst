@@ -1,11 +1,10 @@
 // Metamorphosis Assistant — API Server (Vector Store enabled)
 // -----------------------------------------------------------
-// - Attaches vector_store_ids + file_search tool to every Responses API call
-// - Works with or without assistant_id (USE_ASSISTANT_ID=true)
+// - Always sends `OpenAI-Beta: assistants=v2`
+// - Attaches vector_store_ids + file_search to every Responses API call
 // - Tracks previous_response_id per thread for multi-turn continuity
 // - Accepts JSON or raw-text bodies; returns JSON errors
-// - Optional in-process cron: set SYNC_CRON to a 5-field expression,
-//   e.g. "0,30 * * * *" for every 30 minutes, "*/5 * * * *" for every 5 minutes
+// - Optional cron: set SYNC_CRON (e.g. "0,30 * * * *") to auto-run Notion sync
 
 import "dotenv/config";
 import path from "node:path";
@@ -17,11 +16,15 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import fetch from "node-fetch";
 
-/* -------------------- ESM-safe __dirname -------------------- */
+/* ---------- crash guards & boot log ---------- */
+process.on("uncaughtException", (e) => console.error("[uncaught]", e));
+process.on("unhandledRejection", (e) => console.error("[unhandled]", e));
+
+/* ---------- ESM-safe __dirname ---------- */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-/* -------------------- Helpers / Flags -------------------- */
+/* ---------- helpers/flags ---------- */
 const on  = (v) => /^(1|true|yes|on)$/i.test(String(v || ""));
 const csv = (s) => (s || "").split(",").map(x => x.trim()).filter(Boolean);
 
@@ -29,47 +32,52 @@ const DBG_REQ = on(process.env.DEBUG_LOG_REQUESTS);
 const DBG_BOD = on(process.env.DEBUG_LOG_BODIES);
 const DBG_OA  = on(process.env.DEBUG_OPENAI);
 
-/* -------------------- Required env -------------------- */
-function requireEnv(name) {
-  const v = process.env[name];
-  if (!v || String(v).trim() === "") throw new Error(`Missing required env: ${name}`);
-  return v;
+/* ---------- env (boot-safe: no throws) ---------- */
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+if (!OPENAI_API_KEY) console.warn("[BOOT] OPENAI_API_KEY missing; OpenAI calls will 500.");
+
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+
+// Vector stores (support both new and legacy names)
+const vsSingle  = process.env.VECTOR_STORE_ID || process.env.VS_DEFAULT || process.env.VS_METAMORPHOSIS || "";
+const vsMulti   = process.env.VECTOR_STORE_IDS ? csv(process.env.VECTOR_STORE_IDS) : [];
+const VECTOR_STORE_IDS = Array.from(new Set([...(vsSingle ? [vsSingle] : []), ...vsMulti])).filter(Boolean);
+if (VECTOR_STORE_IDS.length === 0) {
+  console.warn("[BOOT] No vector stores set. Add VECTOR_STORE_ID or VECTOR_STORE_IDS.");
 }
 
-const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
-const DEFAULT_MODEL  = process.env.OPENAI_MODEL || "gpt-4.1-mini";
-
-// Vector store(s)
-const VS_FROM_SINGLE = process.env.VECTOR_STORE_ID ? [process.env.VECTOR_STORE_ID] : [];
-const VECTOR_STORE_IDS = (VS_FROM_SINGLE.length ? VS_FROM_SINGLE : csv(process.env.VECTOR_STORE_IDS)).filter(Boolean);
-
-// Assistant (optional)
 const USE_ASSISTANT = on(process.env.USE_ASSISTANT_ID);
-const ASST_DEFAULT  = USE_ASSISTANT ? requireEnv("ASST_DEFAULT") : process.env.ASST_DEFAULT;
+const ASST_DEFAULT  = process.env.ASST_DEFAULT || "";
+if (USE_ASSISTANT && !ASST_DEFAULT) {
+  console.warn("[BOOT] USE_ASSISTANT_ID=true but ASST_DEFAULT is not set; assistant_id will be omitted.");
+}
 
-// Global instructions (nice to have)
 const ASST_INSTRUCTIONS =
   process.env.ASST_INSTRUCTIONS ||
   "You are the Metamorphosis Assistant. Use the knowledge base (file_search) to answer accurately. Be concise and cite filenames when helpful.";
 
-/* -------------------- Optional in-process cron -------------------- */
-// If SYNC_CRON is set, run the Notion→VectorStore sync script on that schedule.
-if (process.env.SYNC_CRON) {
-  let running = false;
-  const scriptPath = fileURLToPath(new URL("./scripts/sync_knowledge_from_notion_files.mjs", import.meta.url));
-
-  cron.schedule(process.env.SYNC_CRON, () => {
-    if (running) return; // prevent overlap
-    running = true;
-    const child = spawn(process.execPath, [scriptPath], { env: process.env, stdio: "inherit" });
-    child.on("close", () => { running = false; });
-    child.on("error", () => { running = false; });
-  });
-
-  console.log("✓ Notion sync scheduled with CRON:", process.env.SYNC_CRON);
+/* ---------- optional in-process cron ---------- */
+const cronExpr = (process.env.SYNC_CRON || "").trim();
+if (cronExpr) {
+  try {
+    const scriptPath = fileURLToPath(new URL("./scripts/sync_knowledge_from_notion_files.mjs", import.meta.url));
+    let running = false;
+    cron.schedule(cronExpr, () => {
+      if (running) return; // avoid overlap
+      running = true;
+      const child = spawn(process.execPath, [scriptPath], { env: process.env, stdio: "inherit" });
+      child.on("close", () => { running = false; });
+      child.on("error",  () => { running = false; });
+    });
+    console.log("✓ Notion sync scheduled:", cronExpr);
+  } catch (e) {
+    console.error("[BOOT] Failed to schedule SYNC_CRON:", e.message);
+  }
+} else {
+  console.log("↪ SYNC_CRON not set; no scheduled sync.");
 }
 
-/* -------------------- Express -------------------- */
+/* ---------- express ---------- */
 const app = express();
 app.use(express.json({ limit: "1mb" }));
 // also accept raw text (curl/PowerShell quirks) on chat endpoints
@@ -88,19 +96,20 @@ if (DBG_BOD) {
     next();
   });
 }
-// return JSON on invalid JSON
+// Invalid JSON → 400
 app.use((err, _req, res, next) => {
   if (err && err.type === "entity.parse.failed") {
     return res.status(400).json({ ok: false, error: "Invalid JSON payload", details: String(err.message || "") });
   }
   next(err);
 });
-function safeParseJson(s) { try { return JSON.parse(s); } catch { return {}; } }
+const safeParseJson = (s) => { try { return JSON.parse(s); } catch { return {}; } };
 const bodyObj = (req) => (typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}));
 
-/* -------------------- OpenAI /v1/responses -------------------- */
+/* ---------- OpenAI /v1/responses ---------- */
 const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
 
+// Always include beta header so tool_resources & assistant_id are accepted
 const OA_HEADERS = {
   Authorization: `Bearer ${OPENAI_API_KEY}`,
   "Content-Type": "application/json",
@@ -125,6 +134,11 @@ const withKnowledge = (payload) =>
     : payload;
 
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
+  if (!OPENAI_API_KEY) {
+    const err = new Error("Server missing OPENAI_API_KEY");
+    err.status = 500;
+    throw err;
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const req = { method: "POST", headers: OA_HEADERS, body: JSON.stringify(body), signal: controller.signal };
@@ -146,10 +160,10 @@ async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   return json;
 }
 
-/* -------------------- Thread state -------------------- */
+/* ---------- thread state ---------- */
 const lastResponseIdByThread = new Map();
 
-/* -------------------- Routes -------------------- */
+/* ---------- routes ---------- */
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
@@ -159,14 +173,14 @@ app.get("/health", (_req, res) => {
       "POST /chat", "POST /admin/sync-knowledge",
     ],
     env: {
-      OPENAI_API_KEY: "set",
+      OPENAI_API_KEY: OPENAI_API_KEY ? "set" : "missing",
       OPENAI_MODEL: DEFAULT_MODEL,
       VECTOR_STORE_IDS: VECTOR_STORE_IDS,
       USE_ASSISTANT_ID: USE_ASSISTANT,
       ASST_DEFAULT: USE_ASSISTANT ? (ASST_DEFAULT ? "set" : "missing") : "(not used)",
       DEBUG: { DEBUG_LOG_REQUESTS: DBG_REQ, DEBUG_LOG_BODIES: DBG_BOD, DEBUG_OPENAI: DBG_OA },
-      SYNC_CRON: process.env.SYNC_CRON || null,
-      NEED_BETA,
+      SYNC_CRON: cronExpr || null,
+      NEED_BETA: true,
     },
   });
 });
@@ -174,7 +188,7 @@ app.get("/healthz", (_req, res) => res.json({ ok: true }));
 app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 app.get("/start-chat", (_req, res) => res.json({ ok: true, thread_id: crypto.randomUUID() }));
 
-/* ----- First turn ----- */
+// First turn
 app.post("/assistant/ask", async (req, res) => {
   try {
     const body = bodyObj(req);
@@ -190,7 +204,7 @@ app.post("/assistant/ask", async (req, res) => {
       input: blocks(userText),
       store: true,
       ...(prior ? { previous_response_id: prior } : {}),
-      ...(USE_ASSISTANT ? { assistant_id: ASST_DEFAULT } : {}),
+      ...(USE_ASSISTANT && ASST_DEFAULT ? { assistant_id: ASST_DEFAULT } : {}),
     });
 
     const data = await callResponses(payload);
@@ -207,7 +221,7 @@ app.post("/assistant/ask", async (req, res) => {
   }
 });
 
-/* ----- Follow-up turns ----- */
+// Follow-up turns
 app.post("/send", async (req, res) => {
   try {
     const body = bodyObj(req);
@@ -227,7 +241,7 @@ app.post("/send", async (req, res) => {
       input: blocks(userText),
       store: true,
       ...(prior ? { previous_response_id: prior } : {}),
-      ...(USE_ASSISTANT ? { assistant_id: ASST_DEFAULT } : {}),
+      ...(USE_ASSISTANT && ASST_DEFAULT ? { assistant_id: ASST_DEFAULT } : {}),
     });
 
     const data = await callResponses(payload);
@@ -244,7 +258,7 @@ app.post("/send", async (req, res) => {
   }
 });
 
-/* ----- Dev token (optional) ----- */
+// Dev token (optional)
 app.post("/dev/make-token", (req, res) => {
   try {
     if (!on(process.env.DEV_TOKEN_ENABLED)) return res.status(403).json({ ok: false, error: "Disabled" });
@@ -259,7 +273,7 @@ app.post("/dev/make-token", (req, res) => {
   }
 });
 
-/* ----- Optional Chat Completions probe ----- */
+// Simple probe for chat-completions
 app.post("/chat", async (_req, res) => {
   try {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -275,7 +289,7 @@ app.post("/chat", async (_req, res) => {
   }
 });
 
-/* ----- Admin: trigger Notion → VectorStore sync ----- */
+// Admin: trigger Notion → VectorStore sync
 app.post("/admin/sync-knowledge", async (req, res) => {
   const header = req.headers["authorization"] || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
@@ -294,11 +308,12 @@ app.post("/admin/sync-knowledge", async (req, res) => {
   child.on("close", code => res.status(code === 0 ? 200 : 500).json({ ok: code === 0, code, stdout: stdout.trim(), stderr: stderr.trim() }));
 });
 
-/* ----- 404 ----- */
+// 404
 app.use((_req, res) => res.status(404).json({ ok: false, error: "Not Found" }));
 
-/* -------------------- Start -------------------- */
+/* ---------- start ---------- */
 const PORT = process.env.PORT || 10000;
+console.log("[BOOT] Node", process.version, "PORT", PORT, "USE_ASSISTANT_ID", USE_ASSISTANT, "VS", VECTOR_STORE_IDS);
 app.listen(PORT, () => {
   console.log(`✓ Assistant server listening on http://localhost:${PORT}`);
 });
