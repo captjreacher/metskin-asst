@@ -1,12 +1,11 @@
-/**
- * Metamorphosis Assistant — API Server (Vector Store enabled)
- * -----------------------------------------------------------
- * - Attaches vector_store_ids + file_search tool to EVERY Responses API call
- * - Works with or without assistant_id (USE_ASSISTANT_ID=true)
- * - Tracks previous_response_id per thread for multi-turn continuity
- * - Accepts JSON or raw-text bodies; returns JSON errors
- * - Optional in-process cron: set SYNC_CRON="*/30 * * * *"
- */
+// Metamorphosis Assistant — API Server (Vector Store enabled)
+// -----------------------------------------------------------
+// - Attaches vector_store_ids + file_search tool to every Responses API call
+// - Works with or without assistant_id (USE_ASSISTANT_ID=true)
+// - Tracks previous_response_id per thread for multi-turn continuity
+// - Accepts JSON or raw-text bodies; returns JSON errors
+// - Optional in-process cron: set SYNC_CRON to a 5-field expression,
+//   e.g. "0,30 * * * *" for every 30 minutes, "*/5 * * * *" for every 5 minutes
 
 import "dotenv/config";
 import path from "node:path";
@@ -54,13 +53,13 @@ const ASST_INSTRUCTIONS =
   "You are the Metamorphosis Assistant. Use the knowledge base (file_search) to answer accurately. Be concise and cite filenames when helpful.";
 
 /* -------------------- Optional in-process cron -------------------- */
-// Runs the Notion→VectorStore sync script on a schedule if SYNC_CRON is set.
+// If SYNC_CRON is set, run the Notion→VectorStore sync script on that schedule.
 if (process.env.SYNC_CRON) {
   let running = false;
   const scriptPath = fileURLToPath(new URL("./scripts/sync_knowledge_from_notion_files.mjs", import.meta.url));
 
   cron.schedule(process.env.SYNC_CRON, () => {
-    if (running) return;                 // prevent overlap
+    if (running) return; // prevent overlap
     running = true;
     const child = spawn(process.execPath, [scriptPath], { env: process.env, stdio: "inherit" });
     child.on("close", () => { running = false; });
@@ -96,19 +95,24 @@ app.use((err, _req, res, next) => {
   }
   next(err);
 });
-const bodyObj = (req) => (typeof req.body === "string" ? (JSON.parse(req.body || "{}") || {}) : (req.body || {}));
+function safeParseJson(s) { try { return JSON.parse(s); } catch { return {}; } }
+const bodyObj = (req) => (typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}));
 
 /* -------------------- OpenAI /v1/responses -------------------- */
 const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
+
+// Add the beta header whenever it's needed: using assistant_id OR vector stores/tools
+const NEED_BETA = USE_ASSISTANT || (VECTOR_STORE_IDS && VECTOR_STORE_IDS.length > 0);
+
 const OA_HEADERS = {
   Authorization: `Bearer ${OPENAI_API_KEY}`,
   "Content-Type": "application/json",
-  ...(USE_ASSISTANT ? { "OpenAI-Beta": "assistants=v2" } : {}), // assistant_id requires this header
+  ...(NEED_BETA ? { "OpenAI-Beta": "assistants=v2" } : {}),
 };
 
 const headersForLog = (h) => ({
   Authorization: h.Authorization ? `Bearer ${h.Authorization.slice(7, 11)}…` : "(missing)",
-  "OpenAI-Beta": h["OpenAI-Beta"],
+  "OpenAI-Beta": h["OpenAI-Beta"] || "(none)",
   "Content-Type": h["Content-Type"],
 });
 
@@ -165,6 +169,7 @@ app.get("/health", (_req, res) => {
       ASST_DEFAULT: USE_ASSISTANT ? (ASST_DEFAULT ? "set" : "missing") : "(not used)",
       DEBUG: { DEBUG_LOG_REQUESTS: DBG_REQ, DEBUG_LOG_BODIES: DBG_BOD, DEBUG_OPENAI: DBG_OA },
       SYNC_CRON: process.env.SYNC_CRON || null,
+      NEED_BETA,
     },
   });
 });
