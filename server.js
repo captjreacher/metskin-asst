@@ -17,22 +17,18 @@ import jwt from "jsonwebtoken";
 import fetch from "node-fetch";
 import OpenAI from "openai";
 
-// Never reference bare OPENAI_API_KEY
-// Always use process.env
-const OPENAI_KEY = process.env.OPENAI_API_KEY;
+// 1) Load envs locally; Render ignores .env and injects process.env
+import 'dotenv/config';
 
+// 2) Read from process.env (never reference bare OPENAI_API_KEY)
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
 if (!OPENAI_KEY) {
-  console.error("Missing OPENAI_API_KEY environment variable");
+  console.error('Missing OPENAI_API_KEY');
   process.exit(1);
 }
 
-// Example OpenAI client usage
-import OpenAI from "openai";
-const openai = new OpenAI({
-  apiKey: OPENAI_KEY,
-});
-
-
+import OpenAI from 'openai';
+export const openai = new OpenAI({ apiKey: OPENAI_KEY });
 
 /* ---------- crash guards & boot log ---------- */
 process.on("uncaughtException", (e) => console.error("[uncaught]", e));
@@ -387,4 +383,15 @@ const PORT = process.env.PORT || 10000;
 console.log("[BOOT] Node", process.version, "PORT", PORT, "USE_ASSISTANT_ID", USE_ASSISTANT, "VS", VECTOR_STORE_IDS);
 app.listen(PORT, () => {
   console.log(`✓ Assistant server listening on http://localhost:${PORT}`);
+});
+import express from 'express';
+const app = express();
+
+// Simple health route
+app.get('/health', (_req, res) => res.status(200).send('ok'));
+
+// IMPORTANT: listen on Render’s PORT and 0.0.0.0
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server listening on ${PORT}`);
 });
