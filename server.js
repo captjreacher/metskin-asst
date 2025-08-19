@@ -1,50 +1,36 @@
 /**
  * Metamorphosis Assistant — API Server (Vector Store enabled)
  * -----------------------------------------------------------
- * - Vector stores are attached to EVERY Responses API call.
- * - Works without assistant_id (default) or with it (USE_ASSISTANT_ID=true).
- * - Threads via previous_response_id (stored per thread_id).
- * - Always sends content blocks; always includes a model.
- * - Accepts JSON or raw text bodies; returns JSON errors.
- * - Loud logging toggles: DEBUG_LOG_REQUESTS, DEBUG_LOG_BODIES, DEBUG_OPENAI.
+ * - Attaches vector_store_ids + file_search tool to EVERY Responses API call
+ * - Works with or without assistant_id (USE_ASSISTANT_ID=true)
+ * - Tracks previous_response_id per thread for multi-turn continuity
+ * - Accepts JSON or raw-text bodies; returns JSON errors
+ * - Optional in-process cron: set SYNC_CRON="*/30 * * * *"
  */
-// at top: 
+
+import "dotenv/config";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import cron from "node-cron";
 import { spawn } from "node:child_process";
-import path from "path";
-import { fileURLToPath } from "url";
 import express from "express";
-import dotenv from "dotenv";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import fetch from "node-fetch";
 
-dotenv.config();
+/* -------------------- ESM-safe __dirname -------------------- */
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
 
-// schedule via env: SYNC_CRON="*/15 * * * *"  (every 15 minutes)
-if (process.env.SYNC_CRON) {
-  let running = false;
-  const scriptPath = path.join(__dirname, "scripts", "sync_knowledge_from_notion_files.mjs");
+/* -------------------- Helpers / Flags -------------------- */
+const on  = (v) => /^(1|true|yes|on)$/i.test(String(v || ""));
+const csv = (s) => (s || "").split(",").map(x => x.trim()).filter(Boolean);
 
-  cron.schedule(process.env.SYNC_CRON, () => {
-    if (running) return;               // prevent overlap
-    running = true;
-    const child = spawn(process.execPath, [scriptPath], { env: process.env, stdio: "inherit" });
-    child.on("close", () => { running = false; });
-    child.on("error", () => { running = false; });
-  });
-
-  console.log("✓ Notion sync scheduled with CRON:", process.env.SYNC_CRON);
-}
-/* -------------------- App / Debug -------------------- */
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const app = express();
-const on = (v) => /^(1|true|yes|on)$/i.test(String(v || ""));
 const DBG_REQ = on(process.env.DEBUG_LOG_REQUESTS);
 const DBG_BOD = on(process.env.DEBUG_LOG_BODIES);
 const DBG_OA  = on(process.env.DEBUG_OPENAI);
 
-/* -------------------- Env -------------------- */
+/* -------------------- Required env -------------------- */
 function requireEnv(name) {
   const v = process.env[name];
   if (!v || String(v).trim() === "") throw new Error(`Missing required env: ${name}`);
@@ -54,49 +40,47 @@ function requireEnv(name) {
 const OPENAI_API_KEY = requireEnv("OPENAI_API_KEY");
 const DEFAULT_MODEL  = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
-// Vector stores: comma-separated vs_ IDs
-const VECTOR_STORE_IDS = (process.env.VECTOR_STORE_IDS || "")
-  .split(",").map(s => s.trim()).filter(Boolean);
+// Vector store(s)
+const VS_FROM_SINGLE = process.env.VECTOR_STORE_ID ? [process.env.VECTOR_STORE_ID] : [];
+const VECTOR_STORE_IDS = (VS_FROM_SINGLE.length ? VS_FROM_SINGLE : csv(process.env.VECTOR_STORE_IDS)).filter(Boolean);
 
-// Global purpose/instructions for the assistant
-const ASST_INSTRUCTIONS =
-  process.env.ASST_INSTRUCTIONS ||
-  "You are the Metamorphosis Assistant. Use the knowledge base (file_search) to answer questions precisely. Prefer concise, actionable answers and cite relevant filenames when helpful.";
-
-const USE_ASSISTANT = on(process.env.USE_ASSISTANT_ID); // optional
+// Assistant (optional)
+const USE_ASSISTANT = on(process.env.USE_ASSISTANT_ID);
 const ASST_DEFAULT  = USE_ASSISTANT ? requireEnv("ASST_DEFAULT") : process.env.ASST_DEFAULT;
 
-/* -------------------- Parsers & Error Handling -------------------- */
-app.use(express.json({ limit: "1mb" }));
+// Global instructions (nice to have)
+const ASST_INSTRUCTIONS =
+  process.env.ASST_INSTRUCTIONS ||
+  "You are the Metamorphosis Assistant. Use the knowledge base (file_search) to answer accurately. Be concise and cite filenames when helpful.";
 
-// Return JSON (not HTML) on JSON parse errors
-app.use((err, _req, res, next) => {
-  if (err && err.type === "entity.parse.failed") {
-    return res.status(400).json({
-      ok: false,
-      error: "Invalid JSON payload",
-      details: String(err.message || ""),
-    });
-  }
-  next(err);
-});
+/* -------------------- Optional in-process cron -------------------- */
+// Runs the Notion→VectorStore sync script on a schedule if SYNC_CRON is set.
+if (process.env.SYNC_CRON) {
+  let running = false;
+  const scriptPath = fileURLToPath(new URL("./scripts/sync_knowledge_from_notion_files.mjs", import.meta.url));
 
-// Also accept raw text for these endpoints (curl/PowerShell quirks)
-app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
-
-// Static UI
-app.use(express.static(path.join(__dirname, "public")));
-
-// Request logger
-if (DBG_REQ) {
-  app.use((req, _res, next) => {
-    console.log(`[REQ] ${req.method} ${req.url}`);
-    next();
+  cron.schedule(process.env.SYNC_CRON, () => {
+    if (running) return;                 // prevent overlap
+    running = true;
+    const child = spawn(process.execPath, [scriptPath], { env: process.env, stdio: "inherit" });
+    child.on("close", () => { running = false; });
+    child.on("error", () => { running = false; });
   });
+
+  console.log("✓ Notion sync scheduled with CRON:", process.env.SYNC_CRON);
 }
 
-// Body logger (sanitized / string)
-function redact(obj) { try { return JSON.parse(JSON.stringify(obj || {})); } catch { return {}; } }
+/* -------------------- Express -------------------- */
+const app = express();
+app.use(express.json({ limit: "1mb" }));
+// also accept raw text (curl/PowerShell quirks) on chat endpoints
+app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
+app.use(express.static(path.join(__dirname, "public")));
+
+if (DBG_REQ) {
+  app.use((req, _res, next) => { console.log(`[REQ] ${req.method} ${req.url}`); next(); });
+}
+function redact(x) { try { return JSON.parse(JSON.stringify(x || {})); } catch { return {}; } }
 if (DBG_BOD) {
   app.use((req, _res, next) => {
     if (req.path === "/assistant/ask" || req.path === "/send") {
@@ -105,39 +89,39 @@ if (DBG_BOD) {
     next();
   });
 }
-function safeParseJson(s) { try { return JSON.parse(s); } catch { return {}; } }
-function bodyObj(req)     { return typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}); }
+// return JSON on invalid JSON
+app.use((err, _req, res, next) => {
+  if (err && err.type === "entity.parse.failed") {
+    return res.status(400).json({ ok: false, error: "Invalid JSON payload", details: String(err.message || "") });
+  }
+  next(err);
+});
+const bodyObj = (req) => (typeof req.body === "string" ? (JSON.parse(req.body || "{}") || {}) : (req.body || {}));
 
 /* -------------------- OpenAI /v1/responses -------------------- */
 const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || "https://api.openai.com/v1/responses";
 const OA_HEADERS = {
   Authorization: `Bearer ${OPENAI_API_KEY}`,
   "Content-Type": "application/json",
-  ...(USE_ASSISTANT ? { "OpenAI-Beta": "assistants=v2" } : {}), // only when using assistant_id
+  ...(USE_ASSISTANT ? { "OpenAI-Beta": "assistants=v2" } : {}), // assistant_id requires this header
 };
 
-// Build a content block array
-function blocks(text) {
-  return [{ role: "user", content: [{ type: "input_text", text: String(text ?? "") }] }];
-}
+const headersForLog = (h) => ({
+  Authorization: h.Authorization ? `Bearer ${h.Authorization.slice(7, 11)}…` : "(missing)",
+  "OpenAI-Beta": h["OpenAI-Beta"],
+  "Content-Type": h["Content-Type"],
+});
 
-// Attach vector stores (and file_search tool) to a payload
-function withKnowledge(payload) {
-  if (!VECTOR_STORE_IDS.length) return payload;
-  return {
-    ...payload,
-    tools: [{ type: "file_search" }],
-    tool_resources: {
-      file_search: { vector_store_ids: VECTOR_STORE_IDS },
-    },
-  };
-}
+const blocks = (text) => [{ role: "user", content: [{ type: "input_text", text: String(text ?? "") }] }];
 
-// Friendly header log
-function headersForLog(h) {
-  const mask = h.Authorization ? `Bearer ${h.Authorization.slice(7, 11)}…` : "(missing)";
-  return { "Content-Type": h["Content-Type"], "OpenAI-Beta": h["OpenAI-Beta"], Authorization: mask };
-}
+const withKnowledge = (payload) =>
+  VECTOR_STORE_IDS.length
+    ? {
+        ...payload,
+        tools: [{ type: "file_search" }],
+        tool_resources: { file_search: { vector_store_ids: VECTOR_STORE_IDS } },
+      }
+    : payload;
 
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   const controller = new AbortController();
@@ -161,8 +145,7 @@ async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   return json;
 }
 
-/* -------------------- Thread State -------------------- */
-// We persist the last response.id per thread for multi-turn continuity.
+/* -------------------- Thread state -------------------- */
 const lastResponseIdByThread = new Map();
 
 /* -------------------- Routes -------------------- */
@@ -181,43 +164,44 @@ app.get("/health", (_req, res) => {
       USE_ASSISTANT_ID: USE_ASSISTANT,
       ASST_DEFAULT: USE_ASSISTANT ? (ASST_DEFAULT ? "set" : "missing") : "(not used)",
       DEBUG: { DEBUG_LOG_REQUESTS: DBG_REQ, DEBUG_LOG_BODIES: DBG_BOD, DEBUG_OPENAI: DBG_OA },
+      SYNC_CRON: process.env.SYNC_CRON || null,
     },
   });
 });
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
-
 app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
-
 app.get("/start-chat", (_req, res) => res.json({ ok: true, thread_id: crypto.randomUUID() }));
 
 /* ----- First turn ----- */
 app.post("/assistant/ask", async (req, res) => {
   try {
     const body = bodyObj(req);
-    const { message, text, model, thread_id: providedThread } = body;
+    const { message, text, model, thread_id } = body;
     const userText = (typeof message === "string" && message) || (typeof text === "string" && text) || "";
     if (!userText) return res.status(400).json({ ok: false, error: "Field 'message' (or 'text') is required" });
 
-    const prior = providedThread ? lastResponseIdByThread.get(providedThread) : undefined;
+    const prior = thread_id ? lastResponseIdByThread.get(thread_id) : undefined;
 
     const payload = withKnowledge({
-      model: model || DEFAULT_MODEL,                       // required
-      instructions: ASST_INSTRUCTIONS,                     // global purpose
+      model: model || DEFAULT_MODEL,
+      instructions: ASST_INSTRUCTIONS,
       input: blocks(userText),
-      store: true,                                         // store for continuity
-      ...(prior ? { previous_response_id: prior } : {}),   // continue if known
+      store: true,
+      ...(prior ? { previous_response_id: prior } : {}),
       ...(USE_ASSISTANT ? { assistant_id: ASST_DEFAULT } : {}),
     });
 
     const data = await callResponses(payload);
-    const answer = data?.output_text ??
-      (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ?? "";
+    if (thread_id && data?.id) lastResponseIdByThread.set(thread_id, data.id);
 
-    if (providedThread && data?.id) lastResponseIdByThread.set(providedThread, data.id);
+    const answer =
+      data?.output_text ??
+      (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ??
+      "";
 
-    return res.json({ ok: true, answer, data_id: data?.id ?? null });
+    res.json({ ok: true, answer, data_id: data?.id ?? null });
   } catch (e) {
-    return res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
+    res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
   }
 });
 
@@ -229,6 +213,7 @@ app.post("/send", async (req, res) => {
 
     const conv = (typeof thread_id === "string" && thread_id) || (typeof thread === "string" && thread) || "";
     const userText = (typeof text === "string" && text) || (typeof message === "string" && message) || "";
+
     if (!conv)     return res.status(400).json({ ok: false, error: "Field 'thread_id' (or 'thread') is required" });
     if (!userText) return res.status(400).json({ ok: false, error: "Field 'text' (or 'message') is required" });
 
@@ -246,12 +231,14 @@ app.post("/send", async (req, res) => {
     const data = await callResponses(payload);
     if (data?.id) lastResponseIdByThread.set(conv, data.id);
 
-    const msg = data?.output_text ??
-      (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ?? "";
+    const msg =
+      data?.output_text ??
+      (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ??
+      "";
 
-    return res.json({ ok: true, message: msg, data_id: data?.id ?? null });
+    res.json({ ok: true, message: msg, data_id: data?.id ?? null });
   } catch (e) {
-    return res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
+    res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
   }
 });
 
@@ -259,15 +246,14 @@ app.post("/send", async (req, res) => {
 app.post("/dev/make-token", (req, res) => {
   try {
     if (!on(process.env.DEV_TOKEN_ENABLED)) return res.status(403).json({ ok: false, error: "Disabled" });
-    const body = bodyObj(req);
-    const { email, name = "Guest", campaign = "dev" } = body;
+    const { email, name = "Guest", campaign = "dev" } = bodyObj(req);
     if (!email || typeof email !== "string") return res.status(400).json({ ok: false, error: "Field 'email' (string) is required" });
     const secret = process.env.JWT_SECRET;
     if (!secret) return res.status(500).json({ ok: false, error: "JWT_SECRET missing" });
     const token = jwt.sign({ email, name, campaign }, secret, { expiresIn: "1h" });
     res.json({ ok: true, token });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
@@ -283,11 +269,11 @@ app.post("/chat", async (_req, res) => {
     if (!r.ok) return res.status(r.status).json({ ok: false, error: data?.error?.message || "OpenAI error" });
     res.json({ ok: true, answer: data?.choices?.[0]?.message?.content ?? "" });
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-/* ----- Admin: Notion sync ----- */
+/* ----- Admin: trigger Notion → VectorStore sync ----- */
 app.post("/admin/sync-knowledge", async (req, res) => {
   const header = req.headers["authorization"] || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
@@ -296,7 +282,7 @@ app.post("/admin/sync-knowledge", async (req, res) => {
   if (!expected) return res.status(503).json({ ok: false, error: "Sync disabled: set ADMIN_API_TOKEN or JWT_SECRET" });
   if (!token || token !== expected) return res.status(401).json({ ok: false, error: "Unauthorized" });
 
-  const scriptPath = path.join(__dirname, "scripts", "sync_knowledge_from_notion_files.mjs");
+  const scriptPath = fileURLToPath(new URL("./scripts/sync_knowledge_from_notion_files.mjs", import.meta.url));
   const child = spawn(process.execPath, [scriptPath], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
 
   let stdout = "", stderr = "";
