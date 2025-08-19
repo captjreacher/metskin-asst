@@ -6,7 +6,8 @@
 // - Accepts JSON or raw-text bodies; returns JSON errors
 // - Optional cron: set SYNC_CRON (e.g. "0,30 * * * *") to auto-run Notion sync
 
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config({ override: true });
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import cron from "node-cron";
@@ -291,6 +292,7 @@ app.post("/chat", async (_req, res) => {
 
 // Admin: trigger Notion → VectorStore sync
 app.post("/admin/sync-knowledge", async (req, res) => {
+  // Auth
   const header = req.headers["authorization"] || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
   const expected = process.env.ADMIN_API_TOKEN || process.env.JWT_SECRET;
@@ -298,14 +300,56 @@ app.post("/admin/sync-knowledge", async (req, res) => {
   if (!expected) return res.status(503).json({ ok: false, error: "Sync disabled: set ADMIN_API_TOKEN or JWT_SECRET" });
   if (!token || token !== expected) return res.status(401).json({ ok: false, error: "Unauthorized" });
 
+  // Resolve script path and verify it exists
   const scriptPath = fileURLToPath(new URL("./scripts/sync_knowledge_from_notion_files.mjs", import.meta.url));
-  const child = spawn(process.execPath, [scriptPath], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+  if (!fs.existsSync(scriptPath)) {
+    return res.status(500).json({ ok: false, error: "Sync script not found", scriptPath });
+  }
+// Spawn with dotenv preloaded and current env
+const child = spawn(process.execPath, ["-r", "dotenv/config", scriptPath], {
+  env: process.env,
+  stdio: ["ignore", "pipe", "pipe"],
+});
 
-  let stdout = "", stderr = "";
-  child.stdout.on("data", d => (stdout += d.toString()));
-  child.stderr.on("data", d => (stderr += d.toString()));
-  child.on("error", err => res.status(500).json({ ok: false, error: `spawn error: ${err.message}` }));
-  child.on("close", code => res.status(code === 0 ? 200 : 500).json({ ok: code === 0, code, stdout: stdout.trim(), stderr: stderr.trim() }));
+let stdout = "";
+let stderr = "";
+let timedOut = false;
+
+// Collect logs (cap size to avoid pipe backpressure)
+const cap = (s, max = 200_000) => (s.length > max ? s.slice(-max) : s);
+child.stdout.on("data", (d) => (stdout = cap(stdout + d.toString())));
+child.stderr.on("data", (d) => (stderr = cap(stderr + d.toString())));
+
+// Hard timeout (e.g., 2 minutes)
+const KILL_AFTER_MS = +(process.env.SYNC_TIMEOUT_MS || 120_000);
+const t = setTimeout(() => {
+  timedOut = true;
+  try { child.kill("SIGKILL"); } catch {}
+}, KILL_AFTER_MS);
+
+child.on("error", (err) => {
+  clearTimeout(t);
+  return res.status(500).json({
+    ok: false,
+    error: `spawn error: ${err.message}`,
+    scriptPath,
+    stdout,
+    stderr,
+  });
+});
+
+child.on("close", (code) => {
+  clearTimeout(t);
+  const ok = code === 0 && !timedOut;
+  return res.status(ok ? 200 : 500).json({
+    ok,
+    code,
+    timedOut,
+    scriptPath,
+    stdout: stdout.trim(),
+    stderr: stderr.trim(),
+  });
+});
 });
 
 // 404

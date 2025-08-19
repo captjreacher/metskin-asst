@@ -19,7 +19,8 @@
 // Run:  node scripts/sync_knowledge_from_notion_files.mjs
 // Hook: server route POST /admin/sync-knowledge will spawn this script
 
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config({ override: true });
 import crypto from "crypto";
 import fetch from "node-fetch";
 import FormData from "form-data";
