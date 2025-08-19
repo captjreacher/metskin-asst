@@ -8,18 +8,34 @@
  * - Accepts JSON or raw text bodies; returns JSON errors.
  * - Loud logging toggles: DEBUG_LOG_REQUESTS, DEBUG_LOG_BODIES, DEBUG_OPENAI.
  */
-
-import express from "express";
-import dotenv from "dotenv";
+// at top: 
+import cron from "node-cron";
+import { spawn } from "node:child_process";
 import path from "path";
 import { fileURLToPath } from "url";
+import express from "express";
+import dotenv from "dotenv";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
-import { spawn } from "node:child_process";
 import fetch from "node-fetch";
 
 dotenv.config();
 
+// schedule via env: SYNC_CRON="*/15 * * * *"  (every 15 minutes)
+if (process.env.SYNC_CRON) {
+  let running = false;
+  const scriptPath = path.join(__dirname, "scripts", "sync_knowledge_from_notion_files.mjs");
+
+  cron.schedule(process.env.SYNC_CRON, () => {
+    if (running) return;               // prevent overlap
+    running = true;
+    const child = spawn(process.execPath, [scriptPath], { env: process.env, stdio: "inherit" });
+    child.on("close", () => { running = false; });
+    child.on("error", () => { running = false; });
+  });
+
+  console.log("✓ Notion sync scheduled with CRON:", process.env.SYNC_CRON);
+}
 /* -------------------- App / Debug -------------------- */
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
