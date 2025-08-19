@@ -6,8 +6,7 @@
 // - Accepts JSON or raw-text bodies; returns JSON errors
 // - Optional cron: set SYNC_CRON (e.g. "0,30 * * * *") to auto-run Notion sync
 
-import dotenv from "dotenv";
-dotenv.config({ override: true });
+import 'dotenv/config';   // loads .env locally, ignored in Render
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import cron from "node-cron";
@@ -17,6 +16,23 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import fetch from "node-fetch";
 import OpenAI from "openai";
+
+// Never reference bare OPENAI_API_KEY
+// Always use process.env
+const OPENAI_KEY = process.env.OPENAI_API_KEY;
+
+if (!OPENAI_KEY) {
+  console.error("Missing OPENAI_API_KEY environment variable");
+  process.exit(1);
+}
+
+// Example OpenAI client usage
+import OpenAI from "openai";
+const openai = new OpenAI({
+  apiKey: OPENAI_KEY,
+});
+
+
 
 /* ---------- crash guards & boot log ---------- */
 process.on("uncaughtException", (e) => console.error("[uncaught]", e));
