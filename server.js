@@ -215,9 +215,9 @@ app.post("/assistant/ask", async (req, res) => {
       instructions: ASST_INSTRUCTIONS,
       input: blocks(userText),
       store: true,
-      ...(prior ? { previous_response_id: prior } : {}),
-      ...(USE_ASSISTANT && ASST_DEFAULT ? { assistant_id: ASST_DEFAULT } : {}),
+      ...(prior ? { previous_response_id: prior } : {})
     });
+    
 
     const data = await callResponses(payload);
     if (thread_id && data?.id) lastResponseIdByThread.set(thread_id, data.id);
