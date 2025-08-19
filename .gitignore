@@ -6,3 +6,4 @@ secrets/
 Thumbs.db
 /executables/sync-knowledge-remote.cmd
 /.env
+sync-knowledge-remote.cmd
