@@ -16,6 +16,7 @@ import express from "express";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import fetch from "node-fetch";
+import OpenAI from "openai";
 
 /* ---------- crash guards & boot log ---------- */
 process.on("uncaughtException", (e) => console.error("[uncaught]", e));
@@ -33,9 +34,19 @@ const DBG_REQ = on(process.env.DEBUG_LOG_REQUESTS);
 const DBG_BOD = on(process.env.DEBUG_LOG_BODIES);
 const DBG_OA  = on(process.env.DEBUG_OPENAI);
 
-/* ---------- env (boot-safe: no throws) ---------- */
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-if (!OPENAI_API_KEY) console.warn("[BOOT] OPENAI_API_KEY missing; OpenAI calls will 500.");
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+export async function chatWithModel({ message, model = "gpt-4.1-mini" }) {
+  const resp = await openai.responses.create({
+    model,
+    input: [{ role: "user", content: message }],
+    // optional:
+    // system: "your system prompt",
+  });
+  return resp.output_text; // or resp.output[0].content[0].text
+}
+
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
