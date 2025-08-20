@@ -134,7 +134,7 @@ const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || 'https://api.openai.co
 const OA_HEADERS = {
   Authorization: `Bearer ${OPENAI_KEY}`,
   'Content-Type': 'application/json',
-  'OpenAI-Beta': 'assistants=v2', // REQUIRED for tool_resources
+  'OpenAI-Beta': 'assistants=v2', // for Responses attachments
 };
 const headersForLog = (h) => ({
   Authorization: h.Authorization ? `Bearer ${h.Authorization.slice(7, 11)}…` : '(missing)',
@@ -193,7 +193,12 @@ async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   }
 
   let resp, raw;
-  try { resp = await fetch(RESPONSES_URL, req); raw = await resp.text(); } finally { clearTimeout(timer); }
+  try {
+    resp = await fetch(RESPONSES_URL, req);
+    raw = await resp.text();
+  } finally {
+    clearTimeout(timer);
+  }
   if (DBG_OA) console.log('[OA⇠] HTTP', resp?.status, '\n' + raw);
 
   let json; try { json = JSON.parse(raw); } catch { json = { error: { message: raw || 'Non-JSON response' } }; }
@@ -346,7 +351,7 @@ app.post('/admin/sync-knowledge', async (req, res) => {
   child.stderr.on('data', (d) => (stderr = cap(stderr + d.toString())));
   const KILL_AFTER_MS = +(process.env.SYNC_TIMEOUT_MS || 120_000);
   const t = setTimeout(() => { timedOut = true; try { child.kill('SIGKILL'); } catch {} }, KILL_AFTER_MS);
-  child.on('error', (err) => { clearTimeout(t); return res.status(500).json({ ok:false, error:`spawn error: ${err.message}`, scriptPath, stdout, stderr }); });
+  child.on('error', (err) => { clearTimeout(t); return res.status(500).json({ ok: false, error: `spawn error: ${err.message}`, scriptPath, stdout, stderr }); });
   child.on('close', (code) => { clearTimeout(t); const ok = code === 0 && !timedOut; return res.status(ok ? 200 : 500).json({ ok, code, timedOut, scriptPath, stdout: stdout.trim(), stderr: stderr.trim() }); });
 });
 
