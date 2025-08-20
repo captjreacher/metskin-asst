@@ -142,12 +142,15 @@ const headersForLog = (h) => ({
   'Content-Type': h['Content-Type'],
 });
 
-// ✅ Replace your existing withKnowledge() with this:
+// ✅ Drop-in replacement for withKnowledge()
 const withKnowledge = (payload) => {
+  // Copy incoming tools (if any)
   const baseTools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
 
-  // Merge any existing tool-level ids with env ids
-  const idx = baseTools.findIndex(t => t?.type === 'file_search');
+  // Find existing file_search tool (if present)
+  const idx = baseTools.findIndex(t => t && t.type === 'file_search');
+
+  // Merge vector store ids from existing tool + ENV
   const mergedVs = Array.from(new Set([
     ...(idx >= 0 && Array.isArray(baseTools[idx].vector_store_ids)
       ? baseTools[idx].vector_store_ids
@@ -160,11 +163,18 @@ const withKnowledge = (payload) => {
     if (idx === -1) {
       baseTools.push({ type: 'file_search', vector_store_ids: mergedVs });
     } else {
-      baseTools[idx] = { ...baseTools[idx], type: 'file_search', vector_store_ids: mergedVs };
+      baseTools[idx] = {
+        ...baseTools[idx],
+        type: 'file_search',
+        vector_store_ids: mergedVs,
+      };
     }
+  } else if (VECTOR_STORE_IDS.length && idx === -1) {
+    // Defensive: if ENV has ids but somehow mergedVs filtered out (shouldn't happen)
+    baseTools.push({ type: 'file_search', vector_store_ids: VECTOR_STORE_IDS });
   }
 
-  // Also populate tool_resources for forward compatibility
+  // Also populate tool_resources for forward/strict validators
   const tool_resources = mergedVs.length
     ? {
         ...(payload.tool_resources || {}),
@@ -172,9 +182,15 @@ const withKnowledge = (payload) => {
       }
     : payload.tool_resources;
 
-  // Whitelist payload fields (and ensure we never send legacy `attachments`)
+  // Whitelist outgoing fields (strip any legacy/unknowns)
   const {
-    model, input, instructions, store, previous_response_id, metadata, assistant_id,
+    model,
+    input,
+    instructions,
+    store,
+    previous_response_id,
+    metadata,
+    assistant_id,
   } = payload;
 
   return {
@@ -187,25 +203,6 @@ const withKnowledge = (payload) => {
     ...(assistant_id ? { assistant_id } : {}),
     ...(baseTools.length ? { tools: baseTools } : {}),
     ...(tool_resources ? { tool_resources } : {}),
-  };
-};
-
-  // Final hardening: whitelist fields & strip any stray unknowns, including attachments
-  const {
-    model, input, instructions, store, previous_response_id, metadata,
-    assistant_id, tools: _tools, tool_resources: _tool_resources,
-  } = payload;
-
-  return {
-    model,
-    input,
-    ...(instructions ? { instructions } : {}),
-    ...(store ? { store } : {}),
-    ...(previous_response_id ? { previous_response_id } : {}),
-    ...(metadata ? { metadata } : {}),
-    ...(assistant_id ? { assistant_id } : {}),
-    ...(tools?.length ? { tools } : {}),
-    ...(_tool_resources ? { tool_resources: _tool_resources } : {}),
   };
 };
 
