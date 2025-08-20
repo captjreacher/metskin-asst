@@ -11,6 +11,9 @@ import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import OpenAI from 'openai';
 
+// Optional CORS (enable if your frontend is on a different domain)
+import cors from 'cors';
+
 /* ============================= Env & Flags ============================= */
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 if (!OPENAI_KEY) { console.error('[BOOT] Missing OPENAI_API_KEY'); process.exit(1); }
@@ -67,23 +70,48 @@ if (cronExpr) {
 
 /* ============================= OpenAI (single instance) ============================= */
 const openai = new OpenAI({ apiKey: OPENAI_KEY });
+
+/** Safe message → content blocks */
+const toBlocks = (text) => ([
+  { role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] },
+]);
+
+/** Lightweight helper (kept for parity) */
 export async function chatWithModel({ message, model = DEFAULT_MODEL }) {
   const resp = await openai.responses.create({
     model,
-    input: [{ role: 'user', content: message }],
+    input: toBlocks(message),
   });
   return resp.output_text;
 }
 
 /* ============================= Express app ============================= */
 const app = express();
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '2mb' }));
 // Accept raw text on chat endpoints (curl/PowerShell quirks)
 app.use(['/assistant/ask', '/send'], express.text({ type: '*/*', limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Optional CORS: allow single origin or all in DEV
+if (on(process.env.ENABLE_CORS)) {
+  const corsOrigin = process.env.CORS_ORIGIN || true; // true = reflect request origin
+  app.use(cors({ origin: corsOrigin, credentials: true }));
+  console.log('↪ CORS enabled. Origin:', corsOrigin === true ? '(dynamic)' : corsOrigin);
+}
+
 if (DBG_REQ) app.use((req, _res, next) => { console.log(`[REQ] ${req.method} ${req.url}`); next(); });
 const redact = (x) => { try { return JSON.parse(JSON.stringify(x || {})); } catch { return {}; } };
+
+/** Warn & strip legacy `attachments` on inbound bodies */
+function stripLegacyAttachments(req) {
+  const body = typeof req.body === 'string' ? safeParseJson(req.body) : (req.body || {});
+  if (body && typeof body === 'object' && 'attachments' in body) {
+    console.warn('[WARN] Client sent legacy `attachments`; stripping at ingress.');
+    delete body.attachments;
+  }
+  return body;
+}
+
 if (DBG_BOD) app.use((req, _res, next) => {
   if (req.path === '/assistant/ask' || req.path === '/send') {
     console.log(`[BODY ${req.method} ${req.path}]`, typeof req.body === 'string' ? req.body : redact(req.body));
@@ -99,7 +127,7 @@ app.use((err, _req, res, next) => {
 });
 
 const safeParseJson = (s) => { try { return JSON.parse(s); } catch { return {}; } };
-const bodyObj = (req) => (typeof req.body === 'string' ? safeParseJson(req.body) : (req.body || {}));
+const bodyObj = (req) => stripLegacyAttachments(req);
 
 /* ============================= Responses API helpers ============================= */
 const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || 'https://api.openai.com/v1/responses';
@@ -114,32 +142,44 @@ const headersForLog = (h) => ({
   'Content-Type': h['Content-Type'],
 });
 
-// Minimal, safe message builder
-const blocks = (text) => [
-  { role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] },
-];
-
 // ✅ Attach knowledge via top‑level tools + tool_resources (no `attachments`)
 const withKnowledge = (payload) => {
-  if (!VECTOR_STORE_IDS.length) return payload;
-
   const tools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
-  if (!tools.some(t => t?.type === 'file_search')) tools.push({ type: 'file_search' });
+  if (VECTOR_STORE_IDS.length && !tools.some(t => t?.type === 'file_search')) {
+    tools.push({ type: 'file_search' });
+  }
 
-  const tool_resources = {
-    ...(payload.tool_resources || {}),
-    file_search: {
-      vector_store_ids: [
-        ...new Set([
-          ...(payload.tool_resources?.file_search?.vector_store_ids || []),
-          ...VECTOR_STORE_IDS,
-        ]),
-      ],
-    },
+  const tool_resources = VECTOR_STORE_IDS.length
+    ? {
+        ...(payload.tool_resources || {}),
+        file_search: {
+          vector_store_ids: [
+            ...new Set([
+              ...(payload.tool_resources?.file_search?.vector_store_ids || []),
+              ...VECTOR_STORE_IDS,
+            ]),
+          ],
+        },
+      }
+    : payload.tool_resources;
+
+  // Final hardening: whitelist fields & strip any stray unknowns, including attachments
+  const {
+    model, input, instructions, store, previous_response_id, metadata,
+    assistant_id, tools: _tools, tool_resources: _tool_resources,
+  } = payload;
+
+  return {
+    model,
+    input,
+    ...(instructions ? { instructions } : {}),
+    ...(store ? { store } : {}),
+    ...(previous_response_id ? { previous_response_id } : {}),
+    ...(metadata ? { metadata } : {}),
+    ...(assistant_id ? { assistant_id } : {}),
+    ...(tools?.length ? { tools } : {}),
+    ...(_tool_resources ? { tool_resources: _tool_resources } : {}),
   };
-
-  const { attachments, ...rest } = payload; // strip any accidental attachments
-  return { ...rest, tools, tool_resources };
 };
 
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
@@ -157,7 +197,13 @@ async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   if (DBG_OA) console.log('[OA⇠] HTTP', resp?.status, '\n' + raw);
 
   let json; try { json = JSON.parse(raw); } catch { json = { error: { message: raw || 'Non-JSON response' } }; }
-  if (!resp.ok) { const err = new Error(json?.error?.message || json?.message || `OpenAI error (HTTP ${resp.status})`); err.status = resp.status; err.data = json; throw err; }
+  if (!resp.ok) {
+    const msg = json?.error?.message || json?.message || `OpenAI error (HTTP ${resp.status})`;
+    const err = new Error(msg);
+    err.status = resp.status;
+    err.data = json;
+    throw err;
+  }
   return json;
 }
 
@@ -182,6 +228,7 @@ app.get('/health', (_req, res) => {
       DEBUG: { DEBUG_LOG_REQUESTS: DBG_REQ, DEBUG_LOG_BODIES: DBG_BOD, DEBUG_OPENAI: DBG_OA },
       SYNC_CRON: cronExpr || null,
       NEED_BETA: true,
+      ENABLE_CORS: on(process.env.ENABLE_CORS),
     },
   });
 });
@@ -202,7 +249,7 @@ app.post('/assistant/ask', async (req, res) => {
     const payload = withKnowledge({
       model: model || DEFAULT_MODEL,
       instructions: ASST_INSTRUCTIONS,
-      input: blocks(userText),
+      input: toBlocks(userText),
       store: true,
       ...(prior ? { previous_response_id: prior } : {}),
       ...(USE_ASSISTANT && ASST_DEFAULT ? { assistant_id: ASST_DEFAULT } : {}),
@@ -211,7 +258,10 @@ app.post('/assistant/ask', async (req, res) => {
     const data = await callResponses(payload);
     if (thread_id && data?.id) lastResponseIdByThread.set(thread_id, data.id);
 
-    const answer = data?.output_text ?? (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ?? '';
+    const answer =
+      data?.output_text ??
+      (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ??
+      '';
     res.json({ ok: true, answer, data_id: data?.id ?? null });
   } catch (e) {
     res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
@@ -233,7 +283,7 @@ app.post('/send', async (req, res) => {
     const payload = withKnowledge({
       model: model || DEFAULT_MODEL,
       instructions: ASST_INSTRUCTIONS,
-      input: blocks(userText),
+      input: toBlocks(userText),
       store: true,
       ...(prior ? { previous_response_id: prior } : {}),
       ...(USE_ASSISTANT && ASST_DEFAULT ? { assistant_id: ASST_DEFAULT } : {}),
@@ -242,7 +292,10 @@ app.post('/send', async (req, res) => {
     const data = await callResponses(payload);
     if (data?.id) lastResponseIdByThread.set(conv, data.id);
 
-    const msg = data?.output_text ?? (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ?? '';
+    const msg =
+      data?.output_text ??
+      (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ??
+      '';
     res.json({ ok: true, message: msg, data_id: data?.id ?? null });
   } catch (e) {
     res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
