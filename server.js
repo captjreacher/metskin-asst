@@ -134,10 +134,19 @@ const headersForLog = (h) => ({
   'Content-Type': h['Content-Type'],
 });
 const blocks = (text) => [{ role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] }];
-const withKnowledge = (payload) =>
-  VECTOR_STORE_IDS.length
-    ? { ...payload, tools: [{ type: 'file_search' }], tool_resources: { file_search: { vector_store_ids: VECTOR_STORE_IDS } } }
-    : payload;
+const withKnowledge = (payload) => {
+  if (!VECTOR_STORE_IDS.length) return payload;
+  const extra = VECTOR_STORE_IDS.map((id) => ({ vector_store_id: id, tools: [{ type: 'file_search' }] }));
+  const input = Array.isArray(payload.input) ? payload.input.slice() : [];
+  if (input[0]?.content?.[0]) {
+    const firstContent = {
+      ...input[0].content[0],
+      attachments: [...(input[0].content[0].attachments || []), ...extra],
+    };
+    input[0] = { ...input[0], content: [firstContent, ...input[0].content.slice(1)] };
+  }
+  return { ...payload, input };
+};
 
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   const controller = new AbortController();
@@ -146,14 +155,12 @@ async function callResponses(body, { timeoutMs = 45_000 } = {}) {
 
   if (DBG_OA) {
     console.log('[OA HEADERS]', headersForLog(OA_HEADERS));
-    console.log('[OA⇢]', RESPONSES_URL, '
-' + JSON.stringify(body, null, 2));
+    console.log('[OA⇢]', RESPONSES_URL, '\n' + JSON.stringify(body, null, 2));
   }
 
   let resp, raw;
   try { resp = await fetch(RESPONSES_URL, req); raw = await resp.text(); } finally { clearTimeout(timer); }
-  if (DBG_OA) console.log('[OA⇠] HTTP', resp?.status, '
-' + raw);
+  if (DBG_OA) console.log('[OA⇠] HTTP', resp?.status, '\n' + raw);
 
   let json; try { json = JSON.parse(raw); } catch { json = { error: { message: raw || 'Non-JSON response' } }; }
   if (!resp.ok) { const err = new Error(json?.error?.message || json?.message || `OpenAI error (HTTP ${resp.status})`); err.status = resp.status; err.data = json; throw err; }

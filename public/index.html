@@ -36,6 +36,17 @@
     <h2>Metamorphosis Assistant <span class="pill">web</span></h2>
     <div id="status" class="muted card">Starting…</div>
 
+    <div id="devBox" class="card">
+      <h3 style="margin:0 0 8px;">Dev Token</h3>
+      <label>Email</label>
+      <input id="devEmail" type="email" placeholder="you@example.com" />
+      <div class="row" style="margin-top:8px;">
+        <button id="btnToken">Make token</button>
+        <input id="tokenOut" readonly placeholder="token" />
+      </div>
+      <div id="tokStatus" class="muted" style="margin-top:6px"></div>
+    </div>
+
     <div id="chatBox" class="card" style="display:none">
       <div class="row" style="justify-content:space-between;">
         <div><b>Thread:</b> <span id="threadId" class="muted">–</span></div>
@@ -62,6 +73,20 @@
       const $tid=document.getElementById('threadId');
       const $msg=document.getElementById('msg');
       const $msgs=document.getElementById('messages');
+      const $devEmail=document.getElementById('devEmail');
+      const $tokenOut=document.getElementById('tokenOut');
+      const $tokStatus=document.getElementById('tokStatus');
+
+      document.getElementById('btnToken').onclick=async()=>{
+        const email=$devEmail.value.trim();
+        if(!email) return;
+        $tokStatus.textContent='requesting…';
+        const r=await fetch('/dev/make-token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});
+        const j=await r.json().catch(()=>({}));
+        if(!r.ok||j?.ok===false){ $tokStatus.textContent='error: '+(j.error||r.status); return; }
+        $tokenOut.value=j.token||'';
+        $tokStatus.textContent='ok';
+      };
 
       let thread_id=null;
       const history=[]; const HISTORY_MAX=12;
