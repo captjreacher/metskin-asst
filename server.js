@@ -106,7 +106,7 @@ const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || 'https://api.openai.co
 const OA_HEADERS = {
   Authorization: `Bearer ${OPENAI_KEY}`,
   'Content-Type': 'application/json',
-  'OpenAI-Beta': 'assistants=v2', // REQUIRED for tool_resources
+  'OpenAI-Beta': 'assistants=v2', // for Responses attachments
 };
 const headersForLog = (h) => ({
   Authorization: h.Authorization ? `Bearer ${h.Authorization.slice(7, 11)}…` : '(missing)',
@@ -119,27 +119,17 @@ const blocks = (text) => [
   { role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] },
 ];
 
-// ✅ Attach knowledge via top‑level tools + tool_resources (no `attachments`)
+// Attach vector stores using `attachments`
 const withKnowledge = (payload) => {
   if (!VECTOR_STORE_IDS.length) return payload;
 
-  const tools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
-  if (!tools.some(t => t?.type === 'file_search')) tools.push({ type: 'file_search' });
+  const attachments = VECTOR_STORE_IDS.map((id) => ({
+    vector_store_id: id,
+    tools: [{ type: 'file_search' }],
+  }));
 
-  const tool_resources = {
-    ...(payload.tool_resources || {}),
-    file_search: {
-      vector_store_ids: [
-        ...new Set([
-          ...(payload.tool_resources?.file_search?.vector_store_ids || []),
-          ...VECTOR_STORE_IDS,
-        ]),
-      ],
-    },
-  };
-
-  const { attachments, ...rest } = payload; // strip any accidental attachments
-  return { ...rest, tools, tool_resources };
+  const existing = Array.isArray(payload.attachments) ? payload.attachments : [];
+  return { ...payload, attachments: [...existing, ...attachments] };
 };
 
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
@@ -308,7 +298,7 @@ app.post('/admin/sync-knowledge', async (req, res) => {
   child.stderr.on('data', (d) => (stderr = cap(stderr + d.toString())));
   const KILL_AFTER_MS = +(process.env.SYNC_TIMEOUT_MS || 120_000);
   const t = setTimeout(() => { timedOut = true; try { child.kill('SIGKILL'); } catch {} }, KILL_AFTER_MS);
-  child.on('error', (err) => { clearTimeout(t); return res.status(500).json({ ok:false, error:`spawn error: ${err.message}`, scriptPath, stdout, stderr }); });
+  child.on('error', (err) => { clearTimeout(t); return res.status(500).json({ ok: false, error: `spawn error: ${err.message}`, scriptPath, stdout, stderr }); });
   child.on('close', (code) => { clearTimeout(t); const ok = code === 0 && !timedOut; return res.status(ok ? 200 : 500).json({ ok, code, timedOut, scriptPath, stdout: stdout.trim(), stderr: stderr.trim() }); });
 });
 
