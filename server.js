@@ -142,58 +142,24 @@ const headersForLog = (h) => ({
   'Content-Type': h['Content-Type'],
 });
 
-// ✅ Drop-in replacement for withKnowledge()
+// replace the whole withKnowledge() with this version
 const withKnowledge = (payload) => {
-  // Copy incoming tools (if any)
   const baseTools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
-
-  // Find existing file_search tool (if present)
   const idx = baseTools.findIndex(t => t && t.type === 'file_search');
 
-  // Merge vector store ids from existing tool + ENV
-  const mergedVs = Array.from(new Set([
-    ...(idx >= 0 && Array.isArray(baseTools[idx].vector_store_ids)
-      ? baseTools[idx].vector_store_ids
-      : []),
-    ...VECTOR_STORE_IDS,
-  ])).filter(Boolean);
+  // Keep adding file_search so the model knows retrieval is allowed
+  if (idx === -1) baseTools.push({ type: 'file_search' });
 
-  // Ensure a file_search tool exists and carries vector_store_ids
-  if (mergedVs.length) {
-    if (idx === -1) {
-      baseTools.push({ type: 'file_search', vector_store_ids: mergedVs });
-    } else {
-      baseTools[idx] = {
-        ...baseTools[idx],
-        type: 'file_search',
-        vector_store_ids: mergedVs,
-      };
-    }
-  } else if (VECTOR_STORE_IDS.length && idx === -1) {
-    // Defensive: if ENV has ids but somehow mergedVs filtered out (shouldn't happen)
-    baseTools.push({ type: 'file_search', vector_store_ids: VECTOR_STORE_IDS });
-  }
-
-  // Also populate tool_resources for forward/strict validators
-  const tool_resources = mergedVs.length
-    ? {
-        ...(payload.tool_resources || {}),
-        file_search: { vector_store_ids: mergedVs },
-      }
+  // Build tool_resources for Assistants (kept for future), but we’ll strip it if using Responses.
+  const tool_resources = VECTOR_STORE_IDS.length
+    ? { ...(payload.tool_resources || {}), file_search: { vector_store_ids: VECTOR_STORE_IDS } }
     : payload.tool_resources;
 
-  // Whitelist outgoing fields (strip any legacy/unknowns)
   const {
-    model,
-    input,
-    instructions,
-    store,
-    previous_response_id,
-    metadata,
-    assistant_id,
+    model, input, instructions, store, previous_response_id, metadata, assistant_id,
   } = payload;
 
-  return {
+  const out = {
     model,
     input,
     ...(instructions ? { instructions } : {}),
@@ -202,10 +168,16 @@ const withKnowledge = (payload) => {
     ...(metadata ? { metadata } : {}),
     ...(assistant_id ? { assistant_id } : {}),
     ...(baseTools.length ? { tools: baseTools } : {}),
-    ...(tool_resources ? { tool_resources } : {}),
+    // We'll *conditionally* include tool_resources below
   };
-};
 
+  // ❗ Responses API rejects tool_resources; only Assistants API accepts it.
+  // We’re using /v1/responses, so do NOT include tool_resources.
+  // If you later switch to Assistants Runs, you can re-enable the next line.
+  // if (tool_resources) out.tool_resources = tool_resources;
+
+  return out;
+};
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
