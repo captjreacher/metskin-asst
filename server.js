@@ -1,4 +1,5 @@
 // Metamorphosis Assistant — API Server (Responses v2 + Vector Stores)
+// -------------------------------------------------------------------
 import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,7 +11,7 @@ import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import OpenAI from 'openai';
 
-/* ============ Env & Flags ============ */
+/* ============================= Env & Flags ============================= */
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 if (!OPENAI_KEY) { console.error('[BOOT] Missing OPENAI_API_KEY'); process.exit(1); }
 
@@ -18,7 +19,7 @@ const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 const on  = (v) => /^(1|true|yes|on)$/i.test(String(v || ''));
 const csv = (s) => (s || '').split(',').map(x => x.trim()).filter(Boolean);
 
-// Vector stores
+// Vector stores (support both single + list envs)
 const vsSingle = process.env.VECTOR_STORE_ID || process.env.VS_DEFAULT || process.env.VS_METAMORPHOSIS || '';
 const vsMulti  = process.env.VECTOR_STORE_IDS ? csv(process.env.VECTOR_STORE_IDS) : [];
 const VECTOR_STORE_IDS = Array.from(new Set([...(vsSingle ? [vsSingle] : []), ...vsMulti])).filter(Boolean);
@@ -28,22 +29,22 @@ const USE_ASSISTANT = on(process.env.USE_ASSISTANT_ID);
 const ASST_DEFAULT  = process.env.ASST_DEFAULT || '';
 if (USE_ASSISTANT && !ASST_DEFAULT) console.warn('[BOOT] USE_ASSISTANT_ID=true but ASST_DEFAULT is not set.');
 
-const ASST_INSTR = process.env.ASST_INSTRUCTIONS ||
+const ASST_INSTRUCTIONS = process.env.ASST_INSTRUCTIONS ||
   'You are the Metamorphosis Assistant. Use file_search over the knowledge base to answer accurately and concisely.';
 
 const DBG_REQ = on(process.env.DEBUG_LOG_REQUESTS);
 const DBG_BOD = on(process.env.DEBUG_LOG_BODIES);
 const DBG_OA  = on(process.env.DEBUG_OPENAI);
 
-/* ============ Crash Guards ============ */
+/* ============================= Crash Guards ============================= */
 process.on('uncaughtException', (e) => console.error('[uncaught]', e));
 process.on('unhandledRejection', (e) => console.error('[unhandled]', e));
 
-/* ============ __dirname (ESM) ============ */
+/* ============================= __dirname (ESM) ============================= */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-/* ============ Optional Notion sync cron ============ */
+/* ============================= Optional: Notion sync cron ============================= */
 const cronExpr = (process.env.SYNC_CRON || '').trim();
 if (cronExpr) {
   try {
@@ -64,16 +65,20 @@ if (cronExpr) {
   console.log('↪ SYNC_CRON not set; no scheduled sync.');
 }
 
-/* ============ OpenAI (single instance) ============ */
+/* ============================= OpenAI (single instance) ============================= */
 const openai = new OpenAI({ apiKey: OPENAI_KEY });
 export async function chatWithModel({ message, model = DEFAULT_MODEL }) {
-  const resp = await openai.responses.create({ model, input: [{ role: 'user', content: message }] });
+  const resp = await openai.responses.create({
+    model,
+    input: [{ role: 'user', content: message }],
+  });
   return resp.output_text;
 }
 
-/* ============ Express app ============ */
+/* ============================= Express app ============================= */
 const app = express();
 app.use(express.json({ limit: '1mb' }));
+// Accept raw text on chat endpoints (curl/PowerShell quirks)
 app.use(['/assistant/ask', '/send'], express.text({ type: '*/*', limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -85,6 +90,7 @@ if (DBG_BOD) app.use((req, _res, next) => {
   }
   next();
 });
+// Invalid JSON → 400
 app.use((err, _req, res, next) => {
   if (err && err.type === 'entity.parse.failed') {
     return res.status(400).json({ ok: false, error: 'Invalid JSON payload', details: String(err.message || '') });
@@ -95,12 +101,12 @@ app.use((err, _req, res, next) => {
 const safeParseJson = (s) => { try { return JSON.parse(s); } catch { return {}; } };
 const bodyObj = (req) => (typeof req.body === 'string' ? safeParseJson(req.body) : (req.body || {}));
 
-/* ============ Responses API helpers ============ */
+/* ============================= Responses API helpers ============================= */
 const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || 'https://api.openai.com/v1/responses';
 const OA_HEADERS = {
   Authorization: `Bearer ${OPENAI_KEY}`,
   'Content-Type': 'application/json',
-  'OpenAI-Beta': 'assistants=v2',
+  'OpenAI-Beta': 'assistants=v2', // REQUIRED for tool_resources
 };
 const headersForLog = (h) => ({
   Authorization: h.Authorization ? `Bearer ${h.Authorization.slice(7, 11)}…` : '(missing)',
@@ -108,17 +114,16 @@ const headersForLog = (h) => ({
   'Content-Type': h['Content-Type'],
 });
 
-// ✅ Minimal, safe message builder (no global userText)
+// Minimal, safe message builder
 const blocks = (text) => [
-  { role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] }
+  { role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] },
 ];
 
-// Use top-level tools + tool_resources (Responses v2)
+// ✅ Attach knowledge via top‑level tools + tool_resources (no `attachments`)
 const withKnowledge = (payload) => {
   if (!VECTOR_STORE_IDS.length) return payload;
 
   const tools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
-  // ensure file_search tool is declared once
   if (!tools.some(t => t?.type === 'file_search')) tools.push({ type: 'file_search' });
 
   const tool_resources = {
@@ -133,14 +138,9 @@ const withKnowledge = (payload) => {
     },
   };
 
-  // preserve any existing attachments if present
-  const existing = Array.isArray(payload.attachments) ? payload.attachments : [];
-
-  return {
-    ...payload,
-    attachments: [...existing, ...attachments],
+  const { attachments, ...rest } = payload; // strip any accidental attachments
+  return { ...rest, tools, tool_resources };
 };
-
 
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   const controller = new AbortController();
@@ -161,14 +161,18 @@ async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   return json;
 }
 
-/* ============ Thread state ============ */
+/* ============================= Thread state ============================= */
 const lastResponseIdByThread = new Map();
 
-/* ============ Routes ============ */
+/* ============================= Routes ============================= */
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
-    routes: ['GET /', 'GET /health', 'GET /healthz', 'GET /start-chat', 'POST /assistant/ask', 'POST /send', 'POST /dev/make-token', 'POST /chat', 'POST /admin/sync-knowledge'],
+    routes: [
+      'GET  /', 'GET  /health', 'GET  /healthz', 'GET  /start-chat',
+      'POST /assistant/ask', 'POST /send', 'POST /dev/make-token',
+      'POST /chat', 'POST /admin/sync-knowledge',
+    ],
     env: {
       OPENAI_API_KEY: OPENAI_KEY ? 'set' : 'missing',
       OPENAI_MODEL: DEFAULT_MODEL,
@@ -197,7 +201,7 @@ app.post('/assistant/ask', async (req, res) => {
 
     const payload = withKnowledge({
       model: model || DEFAULT_MODEL,
-      instructions: ASST_INSTR,
+      instructions: ASST_INSTRUCTIONS,
       input: blocks(userText),
       store: true,
       ...(prior ? { previous_response_id: prior } : {}),
@@ -228,7 +232,7 @@ app.post('/send', async (req, res) => {
 
     const payload = withKnowledge({
       model: model || DEFAULT_MODEL,
-      instructions: ASST_INSTR,
+      instructions: ASST_INSTRUCTIONS,
       input: blocks(userText),
       store: true,
       ...(prior ? { previous_response_id: prior } : {}),
@@ -245,7 +249,7 @@ app.post('/send', async (req, res) => {
   }
 });
 
-// Dev token
+// Dev token (optional)
 app.post('/dev/make-token', (req, res) => {
   try {
     if (!on(process.env.DEV_TOKEN_ENABLED)) return res.status(403).json({ ok: false, error: 'Disabled' });
@@ -257,7 +261,7 @@ app.post('/dev/make-token', (req, res) => {
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// Probe for chat-completions (separate)
+// Simple probe for chat-completions (separate from Responses)
 app.post('/chat', async (_req, res) => {
   try {
     const r = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -296,10 +300,9 @@ app.post('/admin/sync-knowledge', async (req, res) => {
 // 404
 app.use((_req, res) => res.status(404).json({ ok: false, error: 'Not Found' }));
 
-/* ============ Start ============ */
-const PORT = process.env.PORT || 10000;
+/* ============================= Start ============================= */
+const PORT = process.env.PORT || 10000; // Render injects PORT
 app.listen(PORT, () => {
   console.log(`✓ Assistant server listening on :${PORT}`);
   console.log('[BOOT] Node', process.version, 'USE_ASSISTANT_ID', USE_ASSISTANT, 'VS', VECTOR_STORE_IDS);
 });
-F
