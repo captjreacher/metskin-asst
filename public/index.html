@@ -24,6 +24,7 @@
     .warn { color:var(--warn); }
     .err { color:var(--err); }
     .pill { display:inline-block; padding:2px 8px; border:1px solid #2a3040; border-radius:999px; color:var(--muted); font-size:12px; }
+
     .messages { display:flex; flex-direction:column; gap:10px; max-height:520px; overflow:auto; padding:12px; border:1px solid #252a33; border-radius:12px; background:#0f1117; }
     .bubble { max-width:75%; padding:10px 14px; border-radius:14px; line-height:1.45; white-space:pre-wrap; word-wrap:break-word; box-shadow:0 1px 0 rgba(0,0,0,.2); }
     .bubble.user { align-self:flex-end; background:#22577a; color:#fff; border-bottom-right-radius:6px; }
@@ -35,30 +36,9 @@
     <h2>Metamorphosis Assistant <span class="pill">web</span></h2>
     <div id="status" class="muted card">Starting…</div>
 
-    <div id="devBox" class="card" style="display:none">
-      <h3 style="margin:0 0 8px">Generate dev token</h3>
-      <p class="muted" style="margin-top:0">Posts to <code>/dev/make-token</code>. Keep disabled in prod.</p>
-      <div class="row">
-        <div><label>Email</label><input id="devEmail" type="email" placeholder="lead@example.com" /></div>
-        <div><label>Name</label><input id="devName" type="text" placeholder="Guest" /></div>
-        <div><label>Campaign</label><input id="devCampaign" type="text" value="dev" /></div>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <button id="btnMakeToken">Generate token & reload</button>
-        <span id="devMsg" class="muted"></span>
-      </div>
-    </div>
-
     <div id="chatBox" class="card" style="display:none">
       <div class="row" style="justify-content:space-between;">
         <div><b>Thread:</b> <span id="threadId" class="muted">–</span></div>
-        <div>
-          <b>Model:</b>
-          <select id="model">
-            <option value="gpt-4.1-mini" selected>gpt-4.1-mini</option>
-            <option value="gpt-4.1">gpt-4.1</option>
-          </select>
-        </div>
         <div><b>Status:</b> <span id="ready" class="warn">connecting…</span></div>
       </div>
 
@@ -69,124 +49,49 @@
 
       <div class="row" style="margin-top:8px">
         <button id="btnSend" class="primary">Send</button>
-        <button id="btnGreet">Insert friendly greeting</button>
         <button id="btnClear">Clear conversation</button>
       </div>
-    </div>
-
-    <div class="card muted">
-      Tip: open with <code>?token=eyJ...</code>. For dev convenience, enable <code>DEV_TOKEN_ENABLED=true</code> and use the token generator above.
     </div>
   </div>
 
   <script>
     (async () => {
-      const $status   = document.getElementById('status');
-      const $devBox   = document.getElementById('devBox');
-      const $chatBox  = document.getElementById('chatBox');
-      const $ready    = document.getElementById('ready');
-      const $threadId = document.getElementById('threadId');
-      const $msgIn    = document.getElementById('msg');
-      const $messages = document.getElementById('messages');
-      const $model    = document.getElementById('model');
+      const $status=document.getElementById('status');
+      const $chat=document.getElementById('chatBox');
+      const $ready=document.getElementById('ready');
+      const $tid=document.getElementById('threadId');
+      const $msg=document.getElementById('msg');
+      const $msgs=document.getElementById('messages');
 
-      const qs = new URLSearchParams(location.search);
-      let token = qs.get('token');
-      let thread_id = null;
+      let thread_id=null;
+      const history=[]; const HISTORY_MAX=12;
 
-      const HISTORY_MAX = 8;
-      const history = [];
-      const addBubble = (role, content) => {
-        history.push({ role, content });
-        while (history.length > HISTORY_MAX) history.shift();
-        $messages.innerHTML = '';
-        for (const { role:r, content:c } of history) {
-          const b = document.createElement('div');
-          b.className = `bubble ${r}`;
-          b.textContent = c || '(no content)';
-          $messages.appendChild(b);
-        }
-        $messages.scrollTop = $messages.scrollHeight;
-      };
+      function addBubble(role,text){ const d=document.createElement('div'); d.className='bubble '+role; d.textContent=text||'(no content)'; $msgs.appendChild(d); $msgs.scrollTop=$msgs.scrollHeight; }
+      function add(role,text){ history.push({role, text}); while(history.length>HISTORY_MAX) history.shift(); addBubble(role,text); }
 
-      // Dev token generator
-      document.getElementById('btnMakeToken').onclick = async () => {
-        const email = document.getElementById('devEmail').value.trim();
-        const name = document.getElementById('devName').value.trim() || 'Guest';
-        const campaign = document.getElementById('devCampaign').value.trim() || 'dev';
-        const $msg = document.getElementById('devMsg');
-        try {
-          const r = await fetch('/dev/make-token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, name, campaign })
-          });
-          const data = await r.json();
-          if (!r.ok || !data?.ok || !data?.token) { $msg.textContent = data?.error || 'Disabled'; return; }
-          location.href = '/index.html?token=' + encodeURIComponent(data.token);
-        } catch (e) {
-          $msg.textContent = 'Error: ' + e.message;
-        }
-      };
-
-      document.getElementById('btnGreet').onclick = () => {
-        $msgIn.value = "Hello! I’m looking for a skincare recommendation and possibly a free sample—can you help?";
-        $msgIn.focus();
-      };
-      document.getElementById('btnClear').onclick = () => { $messages.innerHTML = ''; history.length = 0; };
-      document.getElementById('btnSend').onclick = async () => {
-        const text = $msgIn.value.trim();
-        if (!text) return;
-        addBubble('user', text);
-        $msgIn.value = '';
-        await sendMessage(text);
-      };
-      $msgIn.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('btnSend').click(); } });
-
-      async function startChat() {
-        $status.textContent = 'Starting chat…';
-        const resp = await fetch('/start-chat?token=' + encodeURIComponent(token || ''));
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok || !data?.ok || !data?.thread_id) {
-          $status.innerHTML = `<span class="err">Start failed:</span> ${data?.error || 'unknown error'}`;
-          return false;
-        }
-        thread_id = data.thread_id;
-        $threadId.textContent = thread_id;
-        $ready.textContent = 'ready'; $ready.className = 'ok';
-        $chatBox.style.display = 'block';
-        $status.innerHTML = `<span class="ok">Connected.</span> You can chat below.`;
-        return true;
+      async function startThread(){
+        $status.textContent='Starting chat…';
+        const r=await fetch('/start-chat');
+        const j=await r.json().catch(()=>({}));
+        if(!r.ok||!j?.thread_id){ $status.innerHTML='<span class="err">Start failed</span>'; return false; }
+        thread_id=j.thread_id; $tid.textContent=thread_id; $ready.textContent='ready'; $ready.className='ok'; $status.innerHTML='<span class="ok">Connected.</span> You can chat below.'; $chat.style.display='block'; return true;
       }
 
-      async function sendMessage(text) {
-        if (!thread_id) {
-          const started = await startChat();
-          if (!started) { addBubble('assistant', 'Could not start a conversation.'); return; }
-        }
-        $ready.textContent = 'thinking…'; $ready.className = 'warn';
-        const r = await fetch('/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ thread_id, text, model: $model.value })
-        });
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok || j?.ok === false) {
-          addBubble('assistant', 'Oops: ' + (j?.error || 'send failed'));
-          $ready.textContent = 'error'; $ready.className = 'err';
-          return;
-        }
-        const reply = j?.message ?? j?.answer ?? j?.data?.message ?? j?.data?.raw ?? j?.raw ?? '';
-        addBubble('assistant', reply || '(no content)');
-        $ready.textContent = 'ready'; $ready.className = 'ok';
+      async function sendMessage(text){
+        if(!thread_id){ const ok=await startThread(); if(!ok) return; }
+        $ready.textContent='thinking…'; $ready.className='warn';
+        const r=await fetch('/send',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ thread_id, text }) });
+        const j=await r.json().catch(()=>({}));
+        if(!r.ok||j?.ok===false){ add('assistant','Oops: '+(j.error||'send failed')); $ready.textContent='error'; $ready.className='err'; return; }
+        add('assistant', j.message || j.answer || '(no content)');
+        $ready.textContent='ready'; $ready.className='ok';
       }
 
-      if (!token) {
-        $status.innerHTML = 'No token in URL. Use the dev generator below or open with <code>?token=eyJ...</code>.';
-        $devBox.style.display = 'block';
-      } else {
-        await startChat();
-      }
+      document.getElementById('btnSend').onclick=()=>{ const t=$msg.value.trim(); if(!t) return; add('user',t); $msg.value=''; sendMessage(t); };
+      document.getElementById('btnClear').onclick=()=>{ $msgs.innerHTML=''; };
+      $msg.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); document.getElementById('btnSend').click(); } });
+
+      await startThread();
     })();
   </script>
 </body>
