@@ -136,11 +136,9 @@ const headersForLog = (h) => ({
 const blocks = (text) => [{ role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] }];
 const withKnowledge = (payload) => {
   if (!VECTOR_STORE_IDS.length) return payload;
-  const attachments = VECTOR_STORE_IDS.map((id) => ({ vector_store_id: id, tools: [{ type: 'file_search' }] }));
-  const input = Array.isArray(payload.input) ? [...payload.input] : [];
-  if (input.length) input[0] = { ...input[0], attachments };
-  else input.push({ role: 'user', content: [{ type: 'input_text', text: '' }], attachments });
-  return { ...payload, input };
+  const extra = VECTOR_STORE_IDS.map((id) => ({ vector_store_id: id, tools: [{ type: 'file_search' }] }));
+  const attachments = [...(payload.attachments || []), ...extra];
+  return { ...payload, attachments };
 };
 
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
