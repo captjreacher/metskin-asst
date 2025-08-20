@@ -134,10 +134,14 @@ const headersForLog = (h) => ({
   'Content-Type': h['Content-Type'],
 });
 const blocks = (text) => [{ role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] }];
-const withKnowledge = (payload) =>
-  VECTOR_STORE_IDS.length
-    ? { ...payload, tools: [{ type: 'file_search' }], tool_resources: { file_search: { vector_store_ids: VECTOR_STORE_IDS } } }
-    : payload;
+const withKnowledge = (payload) => {
+  if (!VECTOR_STORE_IDS.length) return payload;
+  const attachments = VECTOR_STORE_IDS.map((id) => ({ vector_store_id: id, tools: [{ type: 'file_search' }] }));
+  const input = Array.isArray(payload.input) ? [...payload.input] : [];
+  if (input.length) input[0] = { ...input[0], attachments };
+  else input.push({ role: 'user', content: [{ type: 'input_text', text: '' }], attachments });
+  return { ...payload, input };
+};
 
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   const controller = new AbortController();
