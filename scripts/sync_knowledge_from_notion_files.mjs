@@ -279,6 +279,8 @@ async function processSource(source) {
         const upload = await uploadTextAsFile(header + text, filename);
         const vsFile = await addFileToVectorStore(vsId, upload.id);
 
+        console.log(`[sync] Uploaded '${filename}' → VS ${vsId} (vs_file_id ${vsFile.id}, file_id ${upload.id})`);
+
         // 5) Write back success
         await notion.pages.update({
           page_id: pageId,
