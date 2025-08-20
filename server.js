@@ -134,6 +134,13 @@ const headersForLog = (h) => ({
   'Content-Type': h['Content-Type'],
 });
 
+const blocks = (text) => [
+  {
+    role: 'user',
+    content: [{ type: 'input_text', text: String(text ?? '') }]
+  }
+];
+
 const withKnowledge = (payload) => {
   if (!VECTOR_STORE_IDS.length) return payload;
 
@@ -186,6 +193,8 @@ const lastResponseIdByThread = new Map();
 /* =============================
  * Routes
  * ============================= */
+input: blocks(userText),
+
 app.get('/health', (_req, res) => {
   res.json({
     ok: true,
