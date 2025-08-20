@@ -141,25 +141,43 @@ const headersForLog = (h) => ({
   'OpenAI-Beta': h['OpenAI-Beta'] || '(none)',
   'Content-Type': h['Content-Type'],
 });
-
-// replace the whole withKnowledge() with this version
+// ✅ withKnowledge for /v1/responses (assistants=v2 header)
+// - puts vector_store_ids on the file_search tool
+// - does NOT send tool_resources (Responses rejects it)
 const withKnowledge = (payload) => {
   const baseTools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
-  const idx = baseTools.findIndex(t => t && t.type === 'file_search');
 
-  // Keep adding file_search so the model knows retrieval is allowed
-  if (idx === -1) baseTools.push({ type: 'file_search' });
+  // Find any existing file_search tool
+  const fsIdx = baseTools.findIndex(t => t && t.type === 'file_search');
 
-  // Build tool_resources for Assistants (kept for future), but we’ll strip it if using Responses.
-  const tool_resources = VECTOR_STORE_IDS.length
-    ? { ...(payload.tool_resources || {}), file_search: { vector_store_ids: VECTOR_STORE_IDS } }
-    : payload.tool_resources;
+  // Merge existing tool-level ids with env ids
+  const existingIds = (fsIdx >= 0 && Array.isArray(baseTools[fsIdx].vector_store_ids))
+    ? baseTools[fsIdx].vector_store_ids
+    : [];
 
+  const vsIds = Array.from(new Set([
+    ...existingIds,
+    ...VECTOR_STORE_IDS,
+  ])).filter(Boolean);
+
+  // If we have vector stores, ensure the tool exists and carries them
+  if (vsIds.length) {
+    if (fsIdx === -1) {
+      baseTools.push({ type: 'file_search', vector_store_ids: vsIds });
+    } else {
+      baseTools[fsIdx] = { ...baseTools[fsIdx], type: 'file_search', vector_store_ids: vsIds };
+    }
+  } else {
+    // No VS configured → don't include file_search to avoid API error
+    if (fsIdx >= 0) baseTools.splice(fsIdx, 1);
+  }
+
+  // Whitelist outgoing fields (never attach tool_resources for Responses)
   const {
     model, input, instructions, store, previous_response_id, metadata, assistant_id,
   } = payload;
 
-  const out = {
+  return {
     model,
     input,
     ...(instructions ? { instructions } : {}),
@@ -168,8 +186,9 @@ const withKnowledge = (payload) => {
     ...(metadata ? { metadata } : {}),
     ...(assistant_id ? { assistant_id } : {}),
     ...(baseTools.length ? { tools: baseTools } : {}),
-    // We'll *conditionally* include tool_resources below
   };
+};
+
 
   // ❗ Responses API rejects tool_resources; only Assistants API accepts it.
   // We’re using /v1/responses, so do NOT include tool_resources.
