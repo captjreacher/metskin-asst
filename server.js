@@ -137,8 +137,15 @@ const blocks = (text) => [{ role: 'user', content: [{ type: 'input_text', text: 
 const withKnowledge = (payload) => {
   if (!VECTOR_STORE_IDS.length) return payload;
   const extra = VECTOR_STORE_IDS.map((id) => ({ vector_store_id: id, tools: [{ type: 'file_search' }] }));
-  const attachments = [...(payload.attachments || []), ...extra];
-  return { ...payload, attachments };
+  const input = Array.isArray(payload.input) ? payload.input.slice() : [];
+  if (input[0]?.content?.[0]) {
+    const firstContent = {
+      ...input[0].content[0],
+      attachments: [...(input[0].content[0].attachments || []), ...extra],
+    };
+    input[0] = { ...input[0], content: [firstContent, ...input[0].content.slice(1)] };
+  }
+  return { ...payload, input };
 };
 
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
