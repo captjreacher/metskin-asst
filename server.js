@@ -146,14 +146,12 @@ async function callResponses(body, { timeoutMs = 45_000 } = {}) {
 
   if (DBG_OA) {
     console.log('[OA HEADERS]', headersForLog(OA_HEADERS));
-    console.log('[OA⇢]', RESPONSES_URL, '
-' + JSON.stringify(body, null, 2));
+    console.log('[OA⇢]', RESPONSES_URL, '\n' + JSON.stringify(body, null, 2));
   }
 
   let resp, raw;
   try { resp = await fetch(RESPONSES_URL, req); raw = await resp.text(); } finally { clearTimeout(timer); }
-  if (DBG_OA) console.log('[OA⇠] HTTP', resp?.status, '
-' + raw);
+  if (DBG_OA) console.log('[OA⇠] HTTP', resp?.status, '\n' + raw);
 
   let json; try { json = JSON.parse(raw); } catch { json = { error: { message: raw || 'Non-JSON response' } }; }
   if (!resp.ok) { const err = new Error(json?.error?.message || json?.message || `OpenAI error (HTTP ${resp.status})`); err.status = resp.status; err.data = json; throw err; }
