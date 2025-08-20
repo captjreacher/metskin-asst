@@ -190,13 +190,6 @@ const withKnowledge = (payload) => {
 };
 
 
-  // ❗ Responses API rejects tool_resources; only Assistants API accepts it.
-  // We’re using /v1/responses, so do NOT include tool_resources.
-  // If you later switch to Assistants Runs, you can re-enable the next line.
-  // if (tool_resources) out.tool_resources = tool_resources;
-
-  return out;
-};
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
