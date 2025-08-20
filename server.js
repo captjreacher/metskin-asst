@@ -113,14 +113,25 @@ const blocks = (text) => [
   { role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] }
 ];
 
-// Attach vector stores at the TOP LEVEL of the Responses payload
+// Use top-level tools + tool_resources (Responses v2)
 const withKnowledge = (payload) => {
   if (!VECTOR_STORE_IDS.length) return payload;
 
-  const attachments = VECTOR_STORE_IDS.map((id) => ({
-    vector_store_id: id,
-    tools: [{ type: 'file_search' }],
-  }));
+  const tools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
+  // ensure file_search tool is declared once
+  if (!tools.some(t => t?.type === 'file_search')) tools.push({ type: 'file_search' });
+
+  const tool_resources = {
+    ...(payload.tool_resources || {}),
+    file_search: {
+      vector_store_ids: [
+        ...new Set([
+          ...(payload.tool_resources?.file_search?.vector_store_ids || []),
+          ...VECTOR_STORE_IDS,
+        ]),
+      ],
+    },
+  };
 
   // preserve any existing attachments if present
   const existing = Array.isArray(payload.attachments) ? payload.attachments : [];
@@ -128,8 +139,8 @@ const withKnowledge = (payload) => {
   return {
     ...payload,
     attachments: [...existing, ...attachments],
-  };
 };
+
 
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
   const controller = new AbortController();
