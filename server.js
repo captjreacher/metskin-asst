@@ -113,14 +113,22 @@ const blocks = (text) => [
   { role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] }
 ];
 
-// ✅ Attach vector store references at the **input item** level
+// Attach vector stores at the TOP LEVEL of the Responses payload
 const withKnowledge = (payload) => {
   if (!VECTOR_STORE_IDS.length) return payload;
-  const attachments = VECTOR_STORE_IDS.map((id) => ({ vector_store_id: id, tools: [{ type: 'file_search' }] }));
-  const input = Array.isArray(payload.input) ? [...payload.input] : [];
-  if (input.length) input[0] = { ...input[0], attachments };
-  else input.push({ role: 'user', content: [{ type: 'input_text', text: '' }], attachments });
-  return { ...payload, input };
+
+  const attachments = VECTOR_STORE_IDS.map((id) => ({
+    vector_store_id: id,
+    tools: [{ type: 'file_search' }],
+  }));
+
+  // preserve any existing attachments if present
+  const existing = Array.isArray(payload.attachments) ? payload.attachments : [];
+
+  return {
+    ...payload,
+    attachments: [...existing, ...attachments],
+  };
 };
 
 async function callResponses(body, { timeoutMs = 45_000 } = {}) {
@@ -283,3 +291,4 @@ app.listen(PORT, () => {
   console.log(`✓ Assistant server listening on :${PORT}`);
   console.log('[BOOT] Node', process.version, 'USE_ASSISTANT_ID', USE_ASSISTANT, 'VS', VECTOR_STORE_IDS);
 });
+F
