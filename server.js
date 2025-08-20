@@ -6,7 +6,7 @@
 // - Accepts JSON or raw-text bodies; returns JSON errors
 // - Optional cron: set SYNC_CRON (e.g. "0,30 * * * *") to auto-run Notion sync
 
-import 'dotenv/config'; // local only; Render injects env
+import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,7 +19,7 @@ import OpenAI from 'openai';
 
 /* ---------- env ---------- */
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
-if (!OPENAI_KEY) { console.error('Missing OPENAI_API_KEY'); process.exit(1); }
+if (!OPENAI_KEY) { console.error('Missing OPENAI_KEY'); process.exit(1); }
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 
 const on  = (v) => /^(1|true|yes|on)$/i.test(String(v || ''));
@@ -125,7 +125,7 @@ const lastResponseIdByThread = new Map();
 
 /* ---------- routes ---------- */
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, routes: ['GET /', 'GET /health', 'GET /healthz', 'GET /start-chat', 'POST /assistant/ask', 'POST /send', 'POST /dev/make-token', 'POST /chat', 'POST /admin/sync-knowledge'], env: { OPENAI_API_KEY: OPENAI_KEY ? 'set' : 'missing', OPENAI_MODEL: DEFAULT_MODEL, VECTOR_STORE_IDS, USE_ASSISTANT_ID: USE_ASSISTANT, ASST_DEFAULT: USE_ASSISTANT ? (ASST_DEFAULT ? 'set' : 'missing') : '(not used)', DEBUG: { DEBUG_LOG_REQUESTS: DBG_REQ, DEBUG_LOG_BODIES: DBG_BOD, DEBUG_OPENAI: DBG_OA }, SYNC_CRON: cronExpr || null, NEED_BETA: true } });
+  res.json({ ok: true, routes: ['GET /', 'GET /health', 'GET /healthz', 'GET /start-chat', 'POST /assistant/ask', 'POST /send', 'POST /dev/make-token', 'POST /chat', 'POST /admin/sync-knowledge'], env: { OPENAI_KEY: OPENAI_KEY ? 'set' : 'missing', OPENAI_MODEL: DEFAULT_MODEL, VECTOR_STORE_IDS, USE_ASSISTANT_ID: USE_ASSISTANT, ASST_DEFAULT: USE_ASSISTANT ? (ASST_DEFAULT ? 'set' : 'missing') : '(not used)', DEBUG: { DEBUG_LOG_REQUESTS: DBG_REQ, DEBUG_LOG_BODIES: DBG_BOD, DEBUG_OPENAI: DBG_OA }, SYNC_CRON: cronExpr || null, NEED_BETA: true } });
 });
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
@@ -207,8 +207,3 @@ app.post('/admin/sync-knowledge', async (req, res) => {
 
 // 404
 app.use((_req, res) => res.status(404).json({ ok: false, error: 'Not Found' }));
-
-/* ---------- start ---------- */
-const PORT = process.env.PORT || 10000; // Render sets PORT
-console.log('[BOOT] Node', process.version, 'PORT', PORT, 'USE_ASSISTANT_ID', USE_ASSISTANT, 'VS', VECTOR_STORE_IDS);
-app.listen(PORT, '0.0.0.0', () => { console.log(`✓ Assistant server listening on http://0.0.0.0:${PORT}`); });
