@@ -134,13 +134,6 @@ const headersForLog = (h) => ({
   'Content-Type': h['Content-Type'],
 });
 
-const blocks = (text) => [
-  {
-    role: 'user',
-    content: [{ type: 'input_text', text: String(text ?? '') }]
-  }
-];
-
 const withKnowledge = (payload) => {
   if (!VECTOR_STORE_IDS.length) return payload;
 
@@ -148,6 +141,16 @@ const withKnowledge = (payload) => {
     vector_store_id: id,
     tools: [{ type: 'file_search' }],
   }));
+
+  const input = Array.isArray(payload.input) ? [...payload.input] : [];
+  if (input.length) {
+    input[0] = { ...input[0], attachments };
+  } else {
+    input.push({ role: 'user', content: [{ type: 'input_text', text: '' }], attachments });
+  }
+  return { ...payload, input };
+};
+
 
   const input = Array.isArray(payload.input) ? [...payload.input] : [];
 
@@ -189,6 +192,13 @@ async function callResponses(body, { timeoutMs = 45_000 } = {}) {
  * Thread state
  * ============================= */
 const lastResponseIdByThread = new Map();
+// put this just above your routes (before it's used)
+const blocks = (text) => [
+  {
+    role: 'user',
+    content: [{ type: 'input_text', text: String(text ?? '') }],
+  },
+];
 
 /* =============================
  * Routes
