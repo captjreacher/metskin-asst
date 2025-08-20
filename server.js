@@ -142,26 +142,53 @@ const headersForLog = (h) => ({
   'Content-Type': h['Content-Type'],
 });
 
-// ✅ Attach knowledge via top‑level tools + tool_resources (no `attachments`)
+// ✅ Replace your existing withKnowledge() with this:
 const withKnowledge = (payload) => {
-  const tools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
-  if (VECTOR_STORE_IDS.length && !tools.some(t => t?.type === 'file_search')) {
-    tools.push({ type: 'file_search' });
+  const baseTools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
+
+  // Merge any existing tool-level ids with env ids
+  const idx = baseTools.findIndex(t => t?.type === 'file_search');
+  const mergedVs = Array.from(new Set([
+    ...(idx >= 0 && Array.isArray(baseTools[idx].vector_store_ids)
+      ? baseTools[idx].vector_store_ids
+      : []),
+    ...VECTOR_STORE_IDS,
+  ])).filter(Boolean);
+
+  // Ensure a file_search tool exists and carries vector_store_ids
+  if (mergedVs.length) {
+    if (idx === -1) {
+      baseTools.push({ type: 'file_search', vector_store_ids: mergedVs });
+    } else {
+      baseTools[idx] = { ...baseTools[idx], type: 'file_search', vector_store_ids: mergedVs };
+    }
   }
 
-  const tool_resources = VECTOR_STORE_IDS.length
+  // Also populate tool_resources for forward compatibility
+  const tool_resources = mergedVs.length
     ? {
         ...(payload.tool_resources || {}),
-        file_search: {
-          vector_store_ids: [
-            ...new Set([
-              ...(payload.tool_resources?.file_search?.vector_store_ids || []),
-              ...VECTOR_STORE_IDS,
-            ]),
-          ],
-        },
+        file_search: { vector_store_ids: mergedVs },
       }
     : payload.tool_resources;
+
+  // Whitelist payload fields (and ensure we never send legacy `attachments`)
+  const {
+    model, input, instructions, store, previous_response_id, metadata, assistant_id,
+  } = payload;
+
+  return {
+    model,
+    input,
+    ...(instructions ? { instructions } : {}),
+    ...(store ? { store } : {}),
+    ...(previous_response_id ? { previous_response_id } : {}),
+    ...(metadata ? { metadata } : {}),
+    ...(assistant_id ? { assistant_id } : {}),
+    ...(baseTools.length ? { tools: baseTools } : {}),
+    ...(tool_resources ? { tool_resources } : {}),
+  };
+};
 
   // Final hardening: whitelist fields & strip any stray unknowns, including attachments
   const {
