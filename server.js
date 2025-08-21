@@ -256,8 +256,14 @@ app.post("/assistant/ask", async (req, res) => {
     let status = "queued";
     do {
       await sleep(900);
-      const r = await openai.beta.threads.runs.retrieve(thread_id, run_id);
-      status = r.status;
+      try {
+        const r = await openai.beta.threads.runs.retrieve(thread_id, run_id);
+        status = r.status;
+      } catch (e) {
+        console.log(`[DEBUG] Error in runs.retrieve: ${e.message}`);
+        console.log(`[DEBUG] thread_id=${thread_id}, run_id=${run_id}`);
+        throw e; // re-throw the error
+      }
       if (DBG_OA) console.log(`[OA] run ${run_id} → ${status}`);
     } while (status === "queued" || status === "in_progress");
 
