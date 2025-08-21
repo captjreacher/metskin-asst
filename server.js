@@ -180,7 +180,94 @@ async function httpGetAnswer(threadId, runId) {
   const part = msg?.content?.find((c) => c.type === "text");
   return part?.text?.value || "";
 }
+// ===== Aliases for UIs that call /api/threads =====
 
+// POST /api/threads -> create/reuse cookie-scoped thread
+app.post(`${API_BASE}/threads`, async (req, res) => {
+  try {
+    const cookies = parseCookies(req.headers.cookie || "");
+    let threadId = cookies[COOKIE_NAME];
+    if (!looksLikeThreadId(threadId)) {
+      threadId = await httpCreateThread();
+      setCookie(res, COOKIE_NAME, threadId);
+    }
+    return res.json({ id: threadId });
+  } catch (e) {
+    const details = e?.response?.data || e?.message || String(e);
+    return res.status(e?.response?.status || 500).json({ ok: false, error: "OpenAI error", details });
+  }
+});
+
+// POST /api/threads/:threadId/messages -> append a user message
+app.post(`${API_BASE}/threads/:threadId/messages`, async (req, res) => {
+  try {
+    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const text = b.message || b.text || b.input || b.content;
+    if (!text || !String(text).trim()) {
+      return res.status(400).json({ ok: false, error: "message is required" });
+    }
+    let { threadId } = req.params;
+    if (!looksLikeThreadId(threadId)) {
+      const cookies = parseCookies(req.headers.cookie || "");
+      threadId = cookies[COOKIE_NAME];
+      if (!looksLikeThreadId(threadId)) {
+        threadId = await httpCreateThread();
+        setCookie(res, COOKIE_NAME, threadId);
+      }
+    }
+    await httpAddMessage(threadId, text);
+    return res.json({ ok: true, thread_id: threadId });
+  } catch (e) {
+    const details = e?.response?.data || e?.message || String(e);
+    return res.status(e?.response?.status || 500).json({ ok: false, error: "OpenAI error", details });
+  }
+});
+
+// POST /api/threads/:threadId/runs -> start a run (optional message in body)
+app.post(`${API_BASE}/threads/:threadId/runs`, async (req, res) => {
+  try {
+    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const text = b.message || b.text || b.input;
+    let { threadId } = req.params;
+    if (!looksLikeThreadId(threadId)) {
+      const cookies = parseCookies(req.headers.cookie || "");
+      threadId = cookies[COOKIE_NAME];
+      if (!looksLikeThreadId(threadId)) {
+        threadId = await httpCreateThread();
+        setCookie(res, COOKIE_NAME, threadId);
+      }
+    }
+    if (text && String(text).trim()) await httpAddMessage(threadId, text);
+    const runId = await httpStartRun(threadId, b.model);
+    return res.json({ ok: true, thread_id: threadId, run_id: runId, status: "queued" });
+  } catch (e) {
+    const details = e?.response?.data || e?.message || String(e);
+    return res.status(e?.response?.status || 500).json({ ok: false, error: "OpenAI error", details });
+  }
+});
+
+// GET /api/threads/:threadId/runs/:runId -> poll a run
+app.get(`${API_BASE}/threads/:threadId/runs/:runId`, async (req, res) => {
+  try {
+    let { threadId, runId } = req.params;
+    if (!looksLikeRunId(runId)) return res.status(400).json({ ok: false, error: "Invalid runId" });
+    if (!looksLikeThreadId(threadId)) {
+      const cookies = parseCookies(req.headers.cookie || "");
+      threadId = cookies[COOKIE_NAME];
+    }
+    if (!looksLikeThreadId(threadId)) return res.status(400).json({ ok: false, error: "Missing thread" });
+
+    // using REST helper to retrieve run status
+    const j = await httpJson(
+      `${OPENAI_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}`,
+      { method: "GET" }
+    );
+    return res.json({ ok: true, status: j.status });
+  } catch (e) {
+    const details = e?.response?.data || e?.message || String(e);
+    return res.status(e?.response?.status || 500).json({ ok: false, error: "OpenAI error", details });
+  }
+});
 /* -------------------- API (cookie-scoped) -------------------- */
 
 // Self-test (no Threads) — proves key + egress
