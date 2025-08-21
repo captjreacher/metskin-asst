@@ -14,17 +14,13 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-// ---- init express BEFORE any app.use/app.get ----
-const app = express();
-app.disable("x-powered-by");
-app.set("trust proxy", true);
+// Get OpenAI key from environment, with fallback to OPENAI_API_KEY
+const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
+if (!OPENAI_KEY) {
+  console.error("FATAL: Missing OPENAI_KEY or OPENAI_API_KEY environment variable");
+  process.exit(1);
+}
 
-// parsers
-app.use(express.json({ limit: "2mb" }));
-app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
-
-// static GUI (served from /public) — NOW it's safe
-app.use(express.static(path.join(__dirname, "public")));
 
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -78,6 +74,9 @@ process.on("unhandledRejection", (e) => console.error("[unhandled]", e));
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", true);
+
+// static GUI (served from /public) — NOW it's safe
+app.use(express.static(path.join(__dirname, "public")));
 
 // JSON for most routes
 app.use(express.json({ limit: "2mb" }));
