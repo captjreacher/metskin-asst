@@ -68,6 +68,9 @@ const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", true);
 
+// static GUI (served from /public) — NOW it's safe
+app.use(express.static(path.join(__dirname, "public")));
+
 // JSON for most routes
 app.use(express.json({ limit: "2mb" }));
 // Also accept raw text on key chat routes (PowerShell & odd clients)
