@@ -10,8 +10,6 @@ import { fileURLToPath } from "node:url";
 import cors from "cors";
 import fs from "node:fs";
 import { spawn } from "node:child_process";
-import cors from "cors"; // optional
-import sqlite3 from "sqlite3";
 
 dotenv.config();
 
