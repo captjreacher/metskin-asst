@@ -81,7 +81,7 @@ app.use(express.static(path.join(__dirname, "public")));
 // JSON for most routes
 app.use(express.json({ limit: "2mb" }));
 // Also accept raw text on key chat routes (PowerShell & odd clients)
-app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
+app.use(["/send"], express.text({ type: "*/*", limit: "1mb" }));
 
 // static GUI (served from /public) — NOW it's safe
 app.use(express.static(path.join(__dirname, "public")));
@@ -217,21 +217,21 @@ app.post("/assistant/ask", async (req, res) => {
     try { b = isString ? JSON.parse(req.body) : (req.body || {}); }
     catch { b = { message: String(req.body || "") }; }
 
-    let { thread_id, message, text, model } = b;
+    let { thread_id: threadId, message, text, model } = b;
     const userText = message || text || "";
     if (!userText) return res.status(400).json({ ok: false, error: "Field 'message' (or 'text') is required" });
 
     // Create thread if not supplied
-    if (!thread_id) {
+    if (!threadId) {
       const t = await openai.beta.threads.create();
-      thread_id = t.id;
+      threadId = t.id;
     }
-    if (!thread_id?.startsWith("thread_")) {
-      return res.status(400).json({ ok: false, error: "Invalid thread_id", thread_id });
+    if (!threadId?.startsWith("thread_")) {
+      return res.status(400).json({ ok: false, error: "Invalid thread_id", threadId });
     }
 
     // Add message
-    await openai.beta.threads.messages.create(thread_id, { role: "user", content: userText });
+    await openai.beta.threads.messages.create(threadId, { role: "user", content: userText });
 
     // Start run
     const tool_resources = VS_IDS.length ? { file_search: { vector_store_ids: VS_IDS } } : undefined;
@@ -244,27 +244,27 @@ app.post("/assistant/ask", async (req, res) => {
           tool_resources,
         };
 
-    const run = await openai.beta.threads.runs.create(thread_id, payload);
-    const run_id = run.id;
-    if (!run_id?.startsWith("run_")) {
-      return res.status(502).json({ ok: false, error: "OpenAI returned unexpected run id", got: run_id });
+    const run = await openai.beta.threads.runs.create(threadId, payload);
+    const runId = run.id;
+    if (!runId?.startsWith("run_")) {
+      return res.status(502).json({ ok: false, error: "OpenAI returned unexpected run id", got: runId });
     }
 
     // Poll via SDK
     let status = "queued";
     do {
       await sleep(900);
-      const r = await openai.beta.threads.runs.retrieve(thread_id, run_id);
+      const r = await openai.beta.threads.runs.retrieve(threadId, runId);
       status = r.status;
-      if (DBG_OA) console.log(`[OA] run ${run_id} → ${status}`);
+      if (DBG_OA) console.log(`[OA] run ${runId} → ${status}`);
     } while (status === "queued" || status === "in_progress");
 
     // Fetch last assistant message for this run
-    const msgs = await openai.beta.threads.messages.list(thread_id);
-    const last = msgs.data.find((m) => m.role === "assistant" && m.run_id === run_id);
+    const msgs = await openai.beta.threads.messages.list(threadId);
+    const last = msgs.data.find((m) => m.role === "assistant" && m.run_id === runId);
     const answer = last?.content?.find((c) => c.type === "text")?.text?.value ?? "";
 
-    return res.json({ ok: true, answer, thread_id, run_id });
+    return res.json({ ok: true, answer, thread_id: threadId, run_id: runId });
   } catch (e) {
     return res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
   }
