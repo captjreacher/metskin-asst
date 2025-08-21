@@ -46,7 +46,6 @@ app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
 /* ------------- OpenAI client ------------- */
 
-const openai = new OpenAI();
 
 const ASSISTANT_ID = process.env.ASST_METAMORPHOSIS || process.env.ASST_DEFAULT;
 if (!ASSISTANT_ID) {
