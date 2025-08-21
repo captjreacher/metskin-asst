@@ -14,15 +14,17 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-patchOpenAIPositionalCompat(openai);
 /* ----------------- Config ----------------- */
-
 const PORT = process.env.PORT || 10000;
 const API_BASE = process.env.API_BASE_PATH || "/api";
 
-
-if (!OPENAI_KEY) {
+// Declare the key FIRST…
+const OPENAI_KEY =
+  process.env.OPENAI_API_KEY ||
+  process.env.OPENAI_KEY ||
+  process.env.OPENAI || "";
+  
+  if (!OPENAI_KEY) {
   console.error("FATAL: Missing OPENAI_API_KEY / OPENAI_KEY");
   process.exit(1);
 }
