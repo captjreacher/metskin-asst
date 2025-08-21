@@ -137,6 +137,27 @@ async function getAssistantResponse(threadId, runId) {
         throw new Error(errorMessage);
     }
 }
+import morgan from "morgan";
+
+// A) Completely silence /health
+app.use(morgan("combined", {
+  skip: (req, _res) => req.path === "/health"
+}));
+
+// B) OR: Throttle logging for /health to once per minute
+let lastHealthLog = 0;
+app.use((req, res, next) => {
+  if (req.path !== "/health") return next();
+
+  const now = Date.now();
+  const sampleMs = Number(process.env.HEALTH_LOG_SAMPLE_MS || 60000); // 60s
+  if (now - lastHealthLog >= sampleMs) {
+    lastHealthLog = now;
+    console.log(`[health] ok ${new Date().toISOString()}`);
+  }
+  // Respond fast without extra noise
+  res.status(200).send("ok");
+});
 
 
 /* ============================= Thread state ============================= */
