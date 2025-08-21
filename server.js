@@ -418,16 +418,7 @@ app.post(`${API_BASE}/admin/sync-knowledge`, async (req, res) => {
 
 app.use((_req, res) => res.status(404).json({ ok: false, error: "Not Found" }));
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`✓ Assistant server listening on :${port}`);
-  console.log(
-    "[BOOT]",
-    "ASST_DEFAULT",
-    ASST_DEFAULT || "(model mode)",
-    "VS",
-    VS_IDS.length ? VS_IDS : "(none)",
-    "tool_resources",
-    ENABLE_TOOL_RESOURCES ? "enabled" : "disabled"
-  );
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
