@@ -6,12 +6,15 @@ import express from "express";
 import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { patchOpenAIPositionalCompat } from "./openai_positional_compat.js";
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+patchOpenAIPositionalCompat(openai);
 /* ----------------- Config ----------------- */
 
 const PORT = process.env.PORT || 10000;
@@ -27,7 +30,7 @@ if (!OPENAI_KEY) {
   process.exit(1);
 }
 
-const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
 /* ----------------- App ----------------- */
 
