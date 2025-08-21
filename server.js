@@ -9,9 +9,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
-// Optional packages (loaded safely)
-import cors from "cors";       // only used if ENABLE_CORS=true
-// morgan is loaded dynamically below so missing pkg won’t crash
+// Optional CORS (enabled via ENABLE_CORS=true)
+import cors from "cors"; // safe if not used
+// morgan is loaded dynamically below so a missing package won’t crash
 
 dotenv.config();
 
@@ -30,10 +30,10 @@ if (!OPENAI_KEY) {
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-// The prebuilt assistant to run (optional). If not set, we’ll pass model+instructions directly.
+// Optional prebuilt assistant. If not set, we call with model+instructions.
 const ASST_DEFAULT = process.env.ASST_DEFAULT || "";
 
-// Vector store IDs used for file_search; accept single or comma-separated
+// Vector store IDs used by file_search; support single or comma-separated list.
 const VS_IDS = Array.from(
   new Set(
     (process.env.VECTOR_STORE_IDS || process.env.VECTOR_STORE_ID || "")
@@ -43,7 +43,7 @@ const VS_IDS = Array.from(
   )
 );
 
-// Assistant instructions (inlined fallback includes your training-status phrase)
+// Assistant instructions (fallback includes the training status phrase)
 const ASST_INSTRUCTIONS =
   process.env.ASST_INSTRUCTIONS ||
   [
@@ -57,16 +57,16 @@ const ASST_INSTRUCTIONS =
 const on = (v) => /^(1|true|yes|on)$/i.test(String(v ?? ""));
 const DBG_REQ = on(process.env.DEBUG_LOG_REQUESTS);
 const DBG_BOD = on(process.env.DEBUG_LOG_BODIES);
-const DBG_OA  = on(process.env.DEBUG_OPENAI);
+const DBG_OA = on(process.env.DEBUG_OPENAI);
 const ENABLE_CORS = on(process.env.ENABLE_CORS);
 
-// Health log sampling to reduce log noise
+// Health log sampling (to avoid log spam on Render)
 const HEALTH_LOG_SAMPLE_MS = Number(process.env.HEALTH_LOG_SAMPLE_MS || 60_000);
 
-// Admin token (for sync endpoint and optional dev-token)
+// Admin token (for /admin/sync-knowledge and /dev-token)
 const ADMIN_TOKEN = process.env.ADMIN_API_TOKEN || process.env.JWT_SECRET || "";
 
-// Cron (optional) to run sync script periodically
+// Optional cron schedule, e.g. "*/15 * * * *"
 const SYNC_CRON = (process.env.SYNC_CRON || "").trim();
 
 /* --------------------------- Crash Guards -------------------------- */
@@ -80,8 +80,9 @@ const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", true);
 
-// JSON + text bodies (text for PowerShell/cURL quirks on chat routes)
+// JSON for most routes
 app.use(express.json({ limit: "2mb" }));
+// Also accept raw text on key chat routes (PowerShell & odd clients)
 app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
 
 // Optional CORS
@@ -101,15 +102,20 @@ try {
 if (morgan) {
   app.use(
     morgan("combined", {
-      skip: (req) => req.path === "/health", // don’t spam health checks
+      skip: (req) => req.path === "/health", // keep health probes quiet
     })
   );
 }
 
 // Lightweight request/body debug
 if (DBG_REQ) app.use((req, _res, next) => { console.log(`[REQ] ${req.method} ${req.url}`); next(); });
-const safeParseJson = (s) => { try { return JSON.parse(s); } catch { return {}; } };
-const cleanCopy = (x) => { try { return JSON.parse(JSON.stringify(x || {})); } catch { return x; } };
+
+const safeParseJson = (s) => {
+  try { return JSON.parse(s); } catch { return {}; }
+};
+const cleanCopy = (x) => {
+  try { return JSON.parse(JSON.stringify(x || {})); } catch { return x; }
+};
 if (DBG_BOD) {
   app.use((req, _res, next) => {
     if (req.method !== "GET") {
@@ -138,39 +144,24 @@ app.get("/", (_req, res) => res.status(200).send("alive"));
 
 const openai = new OpenAI({ apiKey: OPENAI_KEY });
 
-// Thread store (if you want ephemeral IDs locally)
-const threadStore = new Map();
-
-/* -------------------------- Assistants Utils ------------------------ */
+/* ----------------------------- Helpers ----------------------------- */
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const bodyObj = (req) => (typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}));
 
-async function pollRun(threadId, runId) {
-  let status;
-  do {
-    await sleep(900);
-    const run = await openai.beta.threads.runs.retrieve(threadId, runId);
-    status = run.status;
-    if (DBG_OA) console.log(`[OA] run ${runId} → ${status}`);
-  } while (status === "queued" || status === "in_progress");
-  return openai.beta.threads.runs.retrieve(threadId, runId);
-}
+/* ---------------------- Assistants Compat Routes -------------------- */
 
-/* ----------------------------- Routes ------------------------------ */
-
-/** Create thread (compat for UI) */
+/** Create thread */
 app.post("/threads", async (_req, res) => {
   try {
     const t = await openai.beta.threads.create();
-    threadStore.set(t.id, t);
     res.json(t);
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
   }
 });
 
-/** Add a user message (compat for UI) */
+/** Add a user message */
 app.post("/threads/:threadId/messages", async (req, res) => {
   try {
     const threadId = req.params.threadId;
@@ -184,19 +175,14 @@ app.post("/threads/:threadId/messages", async (req, res) => {
   }
 });
 
-/** Start a run (compat for UI) */
+/** Start a run */
 app.post("/threads/:threadId/runs", async (req, res) => {
   try {
     const threadId = req.params.threadId;
-
     const tool_resources = VS_IDS.length ? { file_search: { vector_store_ids: VS_IDS } } : undefined;
-
-    // Use a prebuilt assistant if provided; otherwise run with model+instructions directly
     const payload = ASST_DEFAULT
       ? { assistant_id: ASST_DEFAULT, tools: [{ type: "file_search" }], tool_resources }
-      : { model: DEFAULT_MODEL, instructions: ASST_INSTRUCTIONS,
-          tools: [{ type: "file_search" }], tool_resources };
-
+      : { model: DEFAULT_MODEL, instructions: ASST_INSTRUCTIONS, tools: [{ type: "file_search" }], tool_resources };
     const run = await openai.beta.threads.runs.create(threadId, payload);
     res.json(run);
   } catch (e) {
@@ -204,56 +190,88 @@ app.post("/threads/:threadId/runs", async (req, res) => {
   }
 });
 
-/** Poll a run (compat for UI) */
+/** Poll a run (guarded) */
 app.get("/threads/:threadId/runs/:runId", async (req, res) => {
   try {
     const { threadId, runId } = req.params;
+    if (!threadId?.startsWith("thread_") || !runId?.startsWith("run_")) {
+      return res.status(400).json({
+        error: "Bad path parameters. Expect /threads/<thread_id>/runs/<run_id>",
+        got: { threadId, runId },
+      });
+    }
     const run = await openai.beta.threads.runs.retrieve(threadId, runId);
     res.json(run);
   } catch (e) {
-    res.status(e.status || 500).json({ error: e.message });
+    res.status(e.status || 500).json({ error: e.message, details: e.data ?? null });
   }
 });
 
-/** Convenience endpoint: send message + wait for answer */
+/* -------------------------- SDK-only Ask ---------------------------- */
+/** Convenience: send message + run + poll + return final text (no self-HTTP) */
 app.post("/assistant/ask", async (req, res) => {
   try {
-    const b = bodyObj(req);
+    // Parse body (PowerShell-safe)
+    const isString = typeof req.body === "string";
+    let b;
+    try { b = isString ? JSON.parse(req.body) : (req.body || {}); }
+    catch { b = { message: String(req.body || "") }; }
+
     let { thread_id, message, text, model } = b;
     const userText = message || text || "";
     if (!userText) return res.status(400).json({ ok: false, error: "Field 'message' (or 'text') is required" });
 
-    // create thread if not supplied
+    // Create thread if not supplied
     if (!thread_id) {
       const t = await openai.beta.threads.create();
       thread_id = t.id;
     }
+    if (!thread_id?.startsWith("thread_")) {
+      return res.status(400).json({ ok: false, error: "Invalid thread_id", thread_id });
+    }
 
+    // Add message
     await openai.beta.threads.messages.create(thread_id, { role: "user", content: userText });
 
+    // Start run
     const tool_resources = VS_IDS.length ? { file_search: { vector_store_ids: VS_IDS } } : undefined;
     const payload = ASST_DEFAULT
       ? { assistant_id: ASST_DEFAULT, tools: [{ type: "file_search" }], tool_resources }
-      : { model: model || DEFAULT_MODEL, instructions: ASST_INSTRUCTIONS,
-          tools: [{ type: "file_search" }], tool_resources };
+      : {
+          model: model || DEFAULT_MODEL,
+          instructions: ASST_INSTRUCTIONS,
+          tools: [{ type: "file_search" }],
+          tool_resources,
+        };
 
     const run = await openai.beta.threads.runs.create(thread_id, payload);
-    await pollRun(thread_id, run.id);
+    const run_id = run.id;
+    if (!run_id?.startsWith("run_")) {
+      return res.status(502).json({ ok: false, error: "OpenAI returned unexpected run id", got: run_id });
+    }
 
-    // get last assistant message for this run
+    // Poll via SDK
+    let status = "queued";
+    do {
+      await sleep(900);
+      const r = await openai.beta.threads.runs.retrieve(thread_id, run_id);
+      status = r.status;
+      if (DBG_OA) console.log(`[OA] run ${run_id} → ${status}`);
+    } while (status === "queued" || status === "in_progress");
+
+    // Fetch last assistant message for this run
     const msgs = await openai.beta.threads.messages.list(thread_id);
-    const last = msgs.data.find((m) => m.role === "assistant" && m.run_id === run.id);
-    const value =
-      last?.content?.find((c) => c.type === "text")?.text?.value ??
-      "";
+    const last = msgs.data.find((m) => m.role === "assistant" && m.run_id === run_id);
+    const answer = last?.content?.find((c) => c.type === "text")?.text?.value ?? "";
 
-    res.json({ ok: true, answer: value, thread_id, run_id: run.id });
+    return res.json({ ok: true, answer, thread_id, run_id });
   } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
+    return res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
   }
 });
 
-/** Simple probe using Chat Completions (sanity check your API key) */
+/* ------------------------- OpenAI Probe Route ----------------------- */
+/** Simple /chat probe to validate key+egress without Assistants */
 app.post("/chat", async (_req, res) => {
   try {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -269,13 +287,13 @@ app.post("/chat", async (_req, res) => {
   }
 });
 
-/** Dev token endpoint (optional) */
+/* ----------------------- Dev/Admin Endpoints ------------------------ */
+
+/** Return a developer token (if configured) */
 app.post("/dev-token", (_req, res) => {
   if (!ADMIN_TOKEN) return res.status(503).json({ error: "No ADMIN_API_TOKEN / JWT_SECRET set" });
   res.json({ token: ADMIN_TOKEN });
 });
-
-/* ----------------------- Knowledge Sync Runner ---------------------- */
 
 /** Resolve whichever sync script exists */
 function resolveSyncScript() {
@@ -290,7 +308,7 @@ function resolveSyncScript() {
   return null;
 }
 
-/** Admin endpoint to trigger sync (protected by ADMIN_TOKEN) */
+/** Trigger knowledge sync (protected) */
 app.post("/admin/sync-knowledge", async (req, res) => {
   try {
     if (!ADMIN_TOKEN) return res.status(503).json({ ok: false, error: "Sync disabled: set ADMIN_API_TOKEN or JWT_SECRET" });
@@ -330,7 +348,7 @@ app.post("/admin/sync-knowledge", async (req, res) => {
   }
 });
 
-/* -------------------------- Cron Scheduling ------------------------- */
+/* -------------------------- Optional Cron --------------------------- */
 
 if (SYNC_CRON) {
   try {
@@ -364,7 +382,9 @@ app.use((_req, res) => res.status(404).json({ ok: false, error: "Not Found" }));
 const port = process.env.PORT || 3000; // Render injects PORT
 app.listen(port, () => {
   console.log(`✓ Assistant server listening on :${port}`);
-  console.log("[BOOT] Node", process.version,
-              "ASST_DEFAULT", ASST_DEFAULT || "(none)",
-              "VS", VS_IDS.length ? VS_IDS : "(none)");
+  console.log(
+    "[BOOT] Node", process.version,
+    "ASST_DEFAULT", ASST_DEFAULT || "(none)",
+    "VS", VS_IDS.length ? VS_IDS : "(none)"
+  );
 });
