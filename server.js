@@ -8,17 +8,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+// serve /index.html and any assets from /public
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
+app.use(express.static(path.join(__dirname, "public")));
 // Optional CORS (enabled via ENABLE_CORS=true)
 import cors from "cors"; // safe if not used
 // morgan is loaded dynamically below so a missing package won’t crash
 
 dotenv.config();
-
-/* ------------------------------ Paths ------------------------------ */
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 /* --------------------------- Configuration ------------------------- */
 
