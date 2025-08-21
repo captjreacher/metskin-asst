@@ -48,56 +48,12 @@ if (!ASSISTANT_ID) {
   process.exit(1);
 }
 
-const assistant = {
-  createThread: async () => {
-    return await openai.beta.threads.create();
-  },
-
-  addMessage: async (threadId, message) => {
-    return await openai.beta.threads.messages.create(threadId, {
-      role: "user",
-      content: message,
-    });
-  },
-
-  createRun: async (threadId) => {
-    return await openai.beta.threads.runs.create(threadId, {
-      assistant_id: ASSISTANT_ID,
-    });
-  },
-
-  pollRun: async (threadId, runId) => {
-    return new Promise((resolve, reject) => {
-      const interval = setInterval(async () => {
-        try {
-          const run = await openai.beta.threads.runs.retrieve(threadId, runId);
-          if (run.status === "completed") {
-            clearInterval(interval);
-            resolve(run);
-          } else if (run.status === "failed" || run.status === "cancelled" || run.status === "expired") {
-            clearInterval(interval);
-            reject(new Error(`Run ended with status: ${run.status}`));
-          }
-        } catch (error) {
-          clearInterval(interval);
-          reject(error);
-        }
-      }, 1000);
-    });
-  },
-
-  getLastMessage: async (threadId) => {
-    const messages = await openai.beta.threads.messages.list(threadId);
-    return messages.data[0];
-  },
-};
-
-/* -------- Legacy adapters (keep old frontends working) -------- */
+/* -------- API routes -------- */
 
 // Create a new thread
 app.post(`${API_BASE}/threads`, async (_req, res) => {
   try {
-    const thread = await assistant.createThread();
+    const thread = await openai.beta.threads.create();
     res.json({ ok: true, id: thread.id });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -107,11 +63,12 @@ app.post(`${API_BASE}/threads`, async (_req, res) => {
 // Add a message to a thread
 app.post(`${API_BASE}/threads/:threadId/messages`, async (req, res) => {
   try {
-    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const threadId = req.params.threadId;
+    const b = req.body || {};
     const text = b.message || b.text || b.input || b.content;
     if (!text || !String(text).trim()) return res.status(400).json({ ok: false, error: "message is required" });
 
-    const msg = await assistant.addMessage(req.params.threadId, text);
+    const msg = await openai.beta.threads.messages.create(threadId, { role: 'user', content: text });
     res.json({ ok: true, id: msg.id });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -122,19 +79,30 @@ app.post(`${API_BASE}/threads/:threadId/messages`, async (req, res) => {
 app.post(`${API_BASE}/threads/:threadId/runs`, async (req, res) => {
   try {
     const threadId = req.params.threadId;
-    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const b = req.body || {};
     const text = b.message || b.text || b.input;
 
     // Add message if one was provided
     if (text) {
-      await assistant.addMessage(threadId, text);
+      await openai.beta.threads.messages.create(threadId, { role: 'user', content: text });
     }
 
-    const run = await assistant.createRun(threadId);
-    await assistant.pollRun(threadId, run.id);
+    const run = await openai.beta.threads.runs.create(threadId, { assistant_id: ASSISTANT_ID });
 
-    const message = await assistant.getLastMessage(threadId);
-    const answer = message.content[0].text.value;
+    // Polling logic
+    while(true) {
+        const retrievedRun = await openai.beta.threads.runs.retrieve(threadId, run.id);
+        if (retrievedRun.status === 'completed') {
+            break;
+        }
+        if (retrievedRun.status === 'failed' || retrievedRun.status === 'cancelled' || retrievedRun.status === 'expired') {
+            throw new Error(`Run ended with status: ${retrievedRun.status}`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    const messages = await openai.beta.threads.messages.list(threadId);
+    const answer = messages.data[0].content[0].text.value;
 
     res.json({ ok: true, answer, thread_id: threadId, run_id: run.id, status: "completed" });
   } catch (e) {
@@ -145,7 +113,7 @@ app.post(`${API_BASE}/threads/:threadId/runs`, async (req, res) => {
 // (Optional) non-API legacy routes if some pages still call them
 app.post("/threads", async (_req, res) => {
   try {
-    const thread = await assistant.createThread();
+    const thread = await openai.beta.threads.create();
     res.json({ id: thread.id });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -155,18 +123,29 @@ app.post("/threads/:threadId/messages", (req, res) => res.json({ ok: true, accep
 app.post("/threads/:threadId/runs", async (req, res) => {
   try {
     const threadId = req.params.threadId;
-    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const b = req.body || {};
     const text = b.message || b.text || b.input;
 
     if (text) {
-      await assistant.addMessage(threadId, text);
+      await openai.beta.threads.messages.create(threadId, { role: 'user', content: text });
     }
 
-    const run = await assistant.createRun(threadId);
-    await assistant.pollRun(threadId, run.id);
+    const run = await openai.beta.threads.runs.create(threadId, { assistant_id: ASSISTANT_ID });
 
-    const message = await assistant.getLastMessage(threadId);
-    const answer = message.content[0].text.value;
+    // Polling logic
+    while(true) {
+        const retrievedRun = await openai.beta.threads.runs.retrieve(threadId, run.id);
+        if (retrievedRun.status === 'completed') {
+            break;
+        }
+        if (retrievedRun.status === 'failed' || retrievedRun.status === 'cancelled' || retrievedRun.status === 'expired') {
+            throw new Error(`Run ended with status: ${retrievedRun.status}`);
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    const messages = await openai.beta.threads.messages.list(threadId);
+    const answer = messages.data[0].content[0].text.value;
 
     res.json({ ok: true, answer, thread_id: threadId, run_id: run.id, status: "completed" });
   } catch (e) {
