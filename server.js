@@ -14,17 +14,6 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-// ---- init express BEFORE any app.use/app.get ----
-const app = express();
-app.disable("x-powered-by");
-app.set("trust proxy", true);
-
-// parsers
-app.use(express.json({ limit: "2mb" }));
-app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
-
-// static GUI (served from /public) — NOW it's safe
-app.use(express.static(path.join(__dirname, "public")));
 
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -83,6 +72,9 @@ app.set("trust proxy", true);
 app.use(express.json({ limit: "2mb" }));
 // Also accept raw text on key chat routes (PowerShell & odd clients)
 app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
+
+// static GUI (served from /public) — NOW it's safe
+app.use(express.static(path.join(__dirname, "public")));
 
 // Optional CORS
 if (ENABLE_CORS) {
