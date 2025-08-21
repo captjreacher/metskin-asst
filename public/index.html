@@ -65,6 +65,7 @@
 
       let thread_id=null;
       const history=[]; const HISTORY_MAX=12;
+      let sending=false;
 
       function addBubble(role,text){ const d=document.createElement('div'); d.className='bubble '+role; d.textContent=text||'(no content)'; $msgs.appendChild(d); $msgs.scrollTop=$msgs.scrollHeight; }
       function add(role,text){ history.push({role, text}); while(history.length>HISTORY_MAX) history.shift(); addBubble(role,text); }
@@ -78,13 +79,19 @@
       }
 
       async function sendMessage(text){
-        if(!thread_id){ const ok=await startThread(); if(!ok) return; }
-        $ready.textContent='thinking…'; $ready.className='warn';
-        const r=await fetch('/api/run',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ thread_id, message: text }) });
-        const j=await r.json().catch(()=>({}));
-        if(!r.ok||j?.ok===false){ add('assistant','Oops: '+(j.error||'send failed')); $ready.textContent='error'; $ready.className='err'; return; }
-        add('assistant', j.message || j.answer || '(no content)');
-        $ready.textContent='ready'; $ready.className='ok';
+        if(sending) return;
+        sending=true;
+        try {
+          if(!thread_id){ const ok=await startThread(); if(!ok) return; }
+          $ready.textContent='thinking…'; $ready.className='warn';
+          const r=await fetch(`/api/threads/${thread_id}/runs`,{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ message: text }) });
+          const j=await r.json().catch(()=>({}));
+          if(!r.ok||j?.ok===false){ add('assistant','Oops: '+(j.error||'send failed')); $ready.textContent='error'; $ready.className='err'; return; }
+          add('assistant', j.answer || '(no content)');
+          $ready.textContent='ready'; $ready.className='ok';
+        } finally {
+          sending=false;
+        }
       }
 
       document.getElementById('btnSend').onclick=()=>{ const t=$msg.value.trim(); if(!t) return; add('user',t); $msg.value=''; sendMessage(t); };
