@@ -148,6 +148,13 @@ const openai = new OpenAI({ apiKey: OPENAI_KEY });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const bodyObj = (req) => (typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}));
+const validateId = (res, id, prefix, name) => {
+  if (!id?.startsWith(prefix)) {
+    res.status(400).json({ error: `Invalid ${name}`, [name]: id });
+    return false;
+  }
+  return true;
+};
 
 /* ---------------------- Assistants Compat Routes -------------------- */
 
@@ -165,6 +172,7 @@ app.post("/threads", async (_req, res) => {
 app.post("/threads/:threadId/messages", async (req, res) => {
   try {
     const threadId = req.params.threadId;
+    if (!validateId(res, threadId, "thread_", "threadId")) return;
     const body = bodyObj(req);
     const text = body.content || body.message || body.text || "";
     if (!text) return res.status(400).json({ error: "Missing message text" });
@@ -179,6 +187,7 @@ app.post("/threads/:threadId/messages", async (req, res) => {
 app.post("/threads/:threadId/runs", async (req, res) => {
   try {
     const threadId = req.params.threadId;
+    if (!validateId(res, threadId, "thread_", "threadId")) return;
     const tool_resources = VS_IDS.length ? { file_search: { vector_store_ids: VS_IDS } } : undefined;
     const payload = ASST_DEFAULT
       ? { assistant_id: ASST_DEFAULT, tools: [{ type: "file_search" }], tool_resources }
@@ -194,12 +203,8 @@ app.post("/threads/:threadId/runs", async (req, res) => {
 app.get("/threads/:threadId/runs/:runId", async (req, res) => {
   try {
     const { threadId, runId } = req.params;
-    if (!threadId?.startsWith("thread_") || !runId?.startsWith("run_")) {
-      return res.status(400).json({
-        error: "Bad path parameters. Expect /threads/<thread_id>/runs/<run_id>",
-        got: { threadId, runId },
-      });
-    }
+    if (!validateId(res, threadId, "thread_", "threadId")) return;
+    if (!validateId(res, runId, "run_", "runId")) return;
     const run = await openai.beta.threads.runs.retrieve(threadId, runId);
     res.json(run);
   } catch (e) {
