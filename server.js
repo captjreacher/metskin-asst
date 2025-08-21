@@ -148,9 +148,9 @@ const openai = new OpenAI({ apiKey: OPENAI_KEY });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const bodyObj = (req) => (typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}));
-const validateId = (res, id, prefix, name) => {
+const validateId = (res, id, prefix, name, status = 400) => {
   if (!id?.startsWith(prefix)) {
-    res.status(400).json({ error: `Invalid ${name}`, [name]: id });
+    res.status(status).json({ ok: false, error: `Invalid ${name}`, [name]: id });
     return false;
   }
   return true;
@@ -208,7 +208,7 @@ app.get("/threads/:threadId/runs/:runId", async (req, res) => {
     const run = await openai.beta.threads.runs.retrieve(threadId, runId);
     res.json(run);
   } catch (e) {
-    res.status(e.status || 500).json({ error: e.message, details: e.data ?? null });
+    res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
   }
 });
 
@@ -231,9 +231,7 @@ app.post("/assistant/ask", async (req, res) => {
       const t = await openai.beta.threads.create();
       threadId = t.id;
     }
-    if (!threadId?.startsWith("thread_")) {
-      return res.status(400).json({ ok: false, error: "Invalid thread_id", threadId });
-    }
+    if (!validateId(res, threadId, "thread_", "thread_id")) return;
 
     // Add message
     await openai.beta.threads.messages.create(threadId, { role: "user", content: userText });
@@ -251,9 +249,7 @@ app.post("/assistant/ask", async (req, res) => {
 
     const run = await openai.beta.threads.runs.create(threadId, payload);
     const runId = run.id;
-    if (!runId?.startsWith("run_")) {
-      return res.status(502).json({ ok: false, error: "OpenAI returned unexpected run id", got: runId });
-    }
+    if (!validateId(res, runId, "run_", "run_id", 502)) return;
 
     // Poll via SDK
     let status = "queued";
