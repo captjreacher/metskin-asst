@@ -2,7 +2,7 @@ import fetch from 'node-fetch';
 import { spawn } from 'child_process';
 
 const PORT = 10000; // Same as in server.js
-const BASE_URL = `http://localhost:${PORT}`;
+const BASE_URL = `http://localhost:${PORT}/api`;
 
 async function main() {
   let serverProcess;
@@ -27,21 +27,21 @@ async function main() {
 
     // 1. Start a new chat to get a thread_id
     console.log('\n--- 1. Starting a new chat ---');
-    const startRes = await fetch(`${BASE_URL}/start-chat`);
+    const startRes = await fetch(`${BASE_URL}/threads`, { method: 'POST' });
     if (!startRes.ok) {
         throw new Error(`Failed to start chat: ${startRes.status} ${startRes.statusText}`);
     }
     const startData = await startRes.json();
-    if (!startData.ok || !startData.thread_id) {
+    if (!startData.id) {
       throw new Error(`Failed to start chat: ${JSON.stringify(startData)}`);
     }
-    const { thread_id } = startData;
+    const thread_id = startData.id;
     console.log(`✓ Got thread_id: ${thread_id}`);
 
 
     // 2. Ask the first question
-    console.log('\n--- 2. Sending first message (/assistant/ask) ---');
-    const askRes = await fetch(`${BASE_URL}/assistant/ask`, {
+    console.log('\n--- 2. Sending first message (/api/run) ---');
+    const askRes = await fetch(`${BASE_URL}/run`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -63,8 +63,8 @@ async function main() {
 
 
     // 3. Send a follow-up question
-    console.log('\n--- 3. Sending follow-up message (/send) ---');
-    const sendRes = await fetch(`${BASE_URL}/send`, {
+    console.log('\n--- 3. Sending follow-up message (/api/run) ---');
+    const sendRes = await fetch(`${BASE_URL}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
