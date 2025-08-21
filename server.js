@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import cors from "cors"; // optional
+import sqlite3 from "sqlite3";
 
 dotenv.config();
 
@@ -83,8 +84,16 @@ app.use(express.json({ limit: "2mb" }));
 // Also accept raw text on key chat routes (PowerShell & odd clients)
 app.use(["/send"], express.text({ type: "*/*", limit: "1mb" }));
 
-// static GUI (served from /public) — NOW it's safe
-app.use(express.static(path.join(__dirname, "public")));
+// Initialize local SQLite database
+const DB_FILE = process.env.DB_PATH || path.join(__dirname, "data.db");
+const db = new sqlite3.Database(DB_FILE, (err) => {
+  if (err) {
+    console.error("\u21AA Failed to connect to SQLite DB:", err.message);
+  } else {
+    console.log("\u2713 Connected to SQLite DB at", DB_FILE);
+  }
+});
+app.locals.db = db;
 
 // Optional CORS
 if (ENABLE_CORS) {
