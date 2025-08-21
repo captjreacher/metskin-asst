@@ -1,18 +1,18 @@
 // server.js
-// Express + OpenAI Threads via REST (no SDK positional args)
-// Node 20+, ESM ("type": "module")
+// Minimal Express + OpenAI Chat Completions ONLY (no Threads/Assistants)
+// Node 20+, ESM ("type": "module" in package.json)
 
 import express from "express";
+import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import dotenv from "dotenv";
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/* -------------------- Config -------------------- */
+/* ----------------- Config ----------------- */
 
 const PORT = process.env.PORT || 10000;
 const API_BASE = process.env.API_BASE_PATH || "/api";
@@ -20,91 +20,63 @@ const API_BASE = process.env.API_BASE_PATH || "/api";
 const OPENAI_KEY =
   process.env.OPENAI_API_KEY ||
   process.env.OPENAI_KEY ||
-  process.env.OPENAI; // last resort
+  process.env.OPENAI; // last resort env name
 
 if (!OPENAI_KEY) {
-  console.error("FATAL: Missing OPENAI_API_KEY/OPENAI_KEY");
+  console.error("FATAL: Missing OPENAI_API_KEY/OPENAI_KEY env var.");
   process.exit(1);
 }
 
-const ASSISTANT_ID =
-  process.env.OPENAI_ASSISTANT_ID || process.env.ASST_DEFAULT || "";
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const INSTRUCTIONS =
-  process.env.ASST_INSTRUCTIONS ||
-  "You are the Metamorphosis Assistant. Be concise, accurate, and helpful.";
-
-const COOKIE_NAME = process.env.THREAD_COOKIE_NAME || "assistant_thread_id";
-const COOKIE_SECURE =
-  /^(1|true|yes|on)$/i.test(String(process.env.COOKIE_SECURE || "")) ||
-  process.env.NODE_ENV === "production";
-
-/* -------------------- App -------------------- */
+/* ----------------- App ----------------- */
 
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", true);
 
+// Accept JSON and raw text (so you can POST plain text too)
 app.use(express.json({ limit: "2mb" }));
 app.use(express.text({ type: "*/*", limit: "1mb" }));
 
-// Static UI
+// Static UI if you have one
 app.use(express.static(path.join(__dirname, "public")));
 
-// Health
+/* ----------------- Health ----------------- */
+
 app.get("/health", (_req, res) => res.status(200).send("ok"));
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
-/* -------------------- Helpers -------------------- */
+/* ------------- OpenAI helpers ------------- */
 
 const OPENAI_BASE = "https://api.openai.com/v1";
 const OPENAI_BEARER = `Bearer ${OPENAI_KEY}`;
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const looksLikeThreadId = (v) => typeof v === "string" && /^thread_[A-Za-z0-9]/.test(v);
-const looksLikeRunId = (v) => typeof v === "string" && /^run_[A-Za-z0-9]/.test(v);
+// One-shot chat completion (no memory, no threads)
+async function chatComplete({ message, messages, model, system, temperature, top_p }) {
+  // Build messages array
+  let msgs = Array.isArray(messages) ? messages : [];
+  if (!msgs.length && system) msgs.push({ role: "system", content: String(system) });
+  if (!msgs.length && message) msgs.push({ role: "user", content: String(message) });
+  if (!msgs.length) throw new Error("No input provided");
 
-function parseCookies(header) {
-  const out = {};
-  if (!header) return out;
-  for (const p of header.split(";")) {
-    const s = p.trim();
-    const i = s.indexOf("=");
-    if (i > -1) out[s.slice(0, i)] = decodeURIComponent(s.slice(i + 1));
-  }
-  return out;
-}
+  const body = {
+    model: model || DEFAULT_MODEL,
+    messages: msgs,
+    ...(typeof temperature === "number" ? { temperature } : {}),
+    ...(typeof top_p === "number" ? { top_p } : {}),
+  };
 
-function setCookie(res, name, value, opts = {}) {
-  const {
-    httpOnly = true,
-    sameSite = "Lax",
-    secure = COOKIE_SECURE,
-    path = "/",
-    maxAge = 60 * 60 * 24 * 14, // 14 days
-  } = opts;
-  const parts = [`${name}=${encodeURIComponent(value)}`, `Path=${path}`];
-  if (httpOnly) parts.push("HttpOnly");
-  if (secure) parts.push("Secure");
-  if (sameSite) parts.push(`SameSite=${sameSite}`);
-  if (maxAge) parts.push(`Max-Age=${maxAge}`);
-  res.append("Set-Cookie", parts.join("; "));
-}
-
-function errJson(res, status, msg, details) {
-  return res.status(status).json({ ok: false, error: msg, details: details ?? null });
-}
-
-async function httpJson(url, init) {
-  const r = await fetch(url, {
-    ...init,
+  const r = await fetch(`${OPENAI_BASE}/chat/completions`, {
+    method: "POST",
     headers: {
       Authorization: OPENAI_BEARER,
       "Content-Type": "application/json",
-      ...(init?.headers || {}),
+      Accept: "application/json",
     },
+    body: JSON.stringify(body),
   });
+
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     const msg = data?.error?.message || `${r.status} ${r.statusText}`;
@@ -112,307 +84,100 @@ async function httpJson(url, init) {
     e.response = { status: r.status, data };
     throw e;
   }
-  return data;
+
+  const answer = data?.choices?.[0]?.message?.content ?? "";
+  return { answer, usage: data?.usage ?? null, model: body.model };
 }
 
-// 1) Create thread
-async function httpCreateThread() {
-  const j = await httpJson(`${OPENAI_BASE}/threads`, {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-  return j.id; // "thread_..."
-}
+/* ----------------- API ----------------- */
 
-// 2) Add message
-async function httpAddMessage(threadId, text) {
-  return httpJson(`${OPENAI_BASE}/threads/${encodeURIComponent(threadId)}/messages`, {
-    method: "POST",
-    body: JSON.stringify({
-      role: "user",
-      content: String(text),
-    }),
-  });
-}
-
-// 3) Start run (assistant or model mode)
-async function httpStartRun(threadId, modelOverride) {
-  const body = ASSISTANT_ID
-    ? { assistant_id: ASSISTANT_ID }
-    : { model: modelOverride || MODEL, instructions: INSTRUCTIONS };
-  const j = await httpJson(
-    `${OPENAI_BASE}/threads/${encodeURIComponent(threadId)}/runs`,
-    { method: "POST", body: JSON.stringify(body) }
-  );
-  return j.id; // run_id
-}
-
-// 4) Poll run
-async function httpWaitRun(threadId, runId, timeoutMs = 60_000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const j = await httpJson(
-      `${OPENAI_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}`,
-      { method: "GET" }
-    );
-    const s = j.status;
-    if (s === "queued" || s === "in_progress") {
-      await sleep(850);
-      continue;
-    }
-    if (s === "requires_action") {
-      const e = new Error("requires_action");
-      e.details = { required_action: j.required_action };
-      throw e;
-    }
-    return j; // completed/failed/cancelled/expired
-  }
-  throw new Error("Run timed out");
-}
-
-// 5) Read answer
-async function httpGetAnswer(threadId, runId) {
-  const j = await httpJson(
-    `${OPENAI_BASE}/threads/${encodeURIComponent(threadId)}/messages?order=desc&limit=20`,
-    { method: "GET" }
-  );
-  const msg = j.data.find((m) => m.role === "assistant" && m.run_id === runId);
-  const part = msg?.content?.find((c) => c.type === "text");
-  return part?.text?.value || "";
-}
-// ===== Aliases for UIs that call /api/threads =====
-
-// POST /api/threads -> create/reuse cookie-scoped thread
-app.post(`${API_BASE}/threads`, async (req, res) => {
-  try {
-    const cookies = parseCookies(req.headers.cookie || "");
-    let threadId = cookies[COOKIE_NAME];
-    if (!looksLikeThreadId(threadId)) {
-      threadId = await httpCreateThread();
-      setCookie(res, COOKIE_NAME, threadId);
-    }
-    return res.json({ id: threadId });
-  } catch (e) {
-    const details = e?.response?.data || e?.message || String(e);
-    return res.status(e?.response?.status || 500).json({ ok: false, error: "OpenAI error", details });
-  }
-});
-
-// POST /api/threads/:threadId/messages -> append a user message
-app.post(`${API_BASE}/threads/:threadId/messages`, async (req, res) => {
-  try {
-    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
-    const text = b.message || b.text || b.input || b.content;
-    if (!text || !String(text).trim()) {
-      return res.status(400).json({ ok: false, error: "message is required" });
-    }
-    let { threadId } = req.params;
-    if (!looksLikeThreadId(threadId)) {
-      const cookies = parseCookies(req.headers.cookie || "");
-      threadId = cookies[COOKIE_NAME];
-      if (!looksLikeThreadId(threadId)) {
-        threadId = await httpCreateThread();
-        setCookie(res, COOKIE_NAME, threadId);
-      }
-    }
-    await httpAddMessage(threadId, text);
-    return res.json({ ok: true, thread_id: threadId });
-  } catch (e) {
-    const details = e?.response?.data || e?.message || String(e);
-    return res.status(e?.response?.status || 500).json({ ok: false, error: "OpenAI error", details });
-  }
-});
-
-// POST /api/threads/:threadId/runs -> start a run (optional message in body)
-app.post(`${API_BASE}/threads/:threadId/runs`, async (req, res) => {
-  try {
-    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
-    const text = b.message || b.text || b.input;
-    let { threadId } = req.params;
-    if (!looksLikeThreadId(threadId)) {
-      const cookies = parseCookies(req.headers.cookie || "");
-      threadId = cookies[COOKIE_NAME];
-      if (!looksLikeThreadId(threadId)) {
-        threadId = await httpCreateThread();
-        setCookie(res, COOKIE_NAME, threadId);
-      }
-    }
-    if (text && String(text).trim()) await httpAddMessage(threadId, text);
-    const runId = await httpStartRun(threadId, b.model);
-    return res.json({ ok: true, thread_id: threadId, run_id: runId, status: "queued" });
-  } catch (e) {
-    const details = e?.response?.data || e?.message || String(e);
-    return res.status(e?.response?.status || 500).json({ ok: false, error: "OpenAI error", details });
-  }
-});
-
-// GET /api/threads/:threadId/runs/:runId -> poll a run
-app.get(`${API_BASE}/threads/:threadId/runs/:runId`, async (req, res) => {
-  try {
-    let { threadId, runId } = req.params;
-    if (!looksLikeRunId(runId)) return res.status(400).json({ ok: false, error: "Invalid runId" });
-    if (!looksLikeThreadId(threadId)) {
-      const cookies = parseCookies(req.headers.cookie || "");
-      threadId = cookies[COOKIE_NAME];
-    }
-    if (!looksLikeThreadId(threadId)) return res.status(400).json({ ok: false, error: "Missing thread" });
-
-    // using REST helper to retrieve run status
-    const j = await httpJson(
-      `${OPENAI_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}`,
-      { method: "GET" }
-    );
-    return res.json({ ok: true, status: j.status });
-  } catch (e) {
-    const details = e?.response?.data || e?.message || String(e);
-    return res.status(e?.response?.status || 500).json({ ok: false, error: "OpenAI error", details });
-  }
-});
-/* -------------------- API (cookie-scoped) -------------------- */
-
-// Self-test (no Threads) — proves key + egress
+// Self-test: verifies key & egress without any client input
 app.post(`${API_BASE}/selftest`, async (_req, res) => {
   try {
-    const j = await httpJson(`${OPENAI_BASE}/chat/completions`, {
-      method: "POST",
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [{ role: "user", content: "Hello" }],
-      }),
+    const { answer, model } = await chatComplete({ message: "Hello" });
+    res.json({ ok: true, answer, model });
+  } catch (e) {
+    res.status(e?.response?.status || 500).json({
+      ok: false,
+      error: e.message,
+      details: e?.response?.data ?? null,
     });
-    return res.json({ ok: true, answer: j?.choices?.[0]?.message?.content ?? "" });
-  } catch (e) {
-    const details = e?.response?.data || e?.message || String(e);
-    return errJson(res, e?.response?.status || 500, "OpenAI error", details);
   }
 });
 
-// One-shot ask/answer
-app.post(`${API_BASE}/run`, async (req, res) => {
+/**
+ * POST /api/chat
+ * Body options:
+ * - text/plain: the body IS the user message (simplest)
+ * - application/json:
+ *   {
+ *     "message": "hi",              // single-shot
+ *     "messages": [...],            // full chat history array (role/content)
+ *     "system": "You are helpful",  // optional system prompt
+ *     "model": "gpt-4o-mini",       // optional
+ *     "temperature": 0.7,           // optional
+ *     "top_p": 1                    // optional
+ *   }
+ */
+app.post(`${API_BASE}/chat`, async (req, res) => {
   try {
-    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
-    const userText = b.message || b.text || b.input;
-    if (!userText || !String(userText).trim()) {
-      return errJson(res, 400, "message is required");
-    }
-
-    // cookie-scoped thread (create if missing)
-    const cookies = parseCookies(req.headers.cookie || "");
-    let threadId = cookies[COOKIE_NAME];
-    if (!looksLikeThreadId(threadId)) {
-      threadId = await httpCreateThread();
-      setCookie(res, COOKIE_NAME, threadId);
-    }
-
-    await httpAddMessage(threadId, userText);
-    const runId = await httpStartRun(threadId, b.model);
-    await httpWaitRun(threadId, runId);
-    const answer = await httpGetAnswer(threadId, runId);
-
-    return res.json({ ok: true, answer, thread_id: threadId, run_id: runId, mode: ASSISTANT_ID ? "assistant" : "model" });
+    // Accept both JSON bodies and raw text
+    const isString = typeof req.body === "string";
+    const b = isString ? { message: req.body } : (req.body || {});
+    const { answer, model, usage } = await chatComplete(b);
+    res.json({ ok: true, answer, model, usage });
   } catch (e) {
-    // graceful fallback to plain chat so the UI still gets an answer
-    try {
-      const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
-      const userText = b.message || b.text || b.input;
-      if (!userText || !String(userText).trim()) throw e;
-
-      const j = await httpJson(`${OPENAI_BASE}/chat/completions`, {
-        method: "POST",
-        body: JSON.stringify({
-          model: MODEL,
-          messages: [{ role: "user", content: String(userText) }],
-        }),
-      });
-      const answer = j?.choices?.[0]?.message?.content ?? "";
-      return res.json({ ok: true, answer, thread_id: null, run_id: null, mode: "fallback" });
-    } catch (e2) {
-      const details = e2?.response?.data || e2?.message || String(e2);
-      return errJson(res, e2?.response?.status || 500, "OpenAI error", details);
-    }
+    res.status(e?.response?.status || 400).json({
+      ok: false,
+      error: e.message || "Bad Request",
+      details: e?.response?.data ?? null,
+    });
   }
 });
 
-/* ------------- Back-compat aliases for old UIs (/threads) ------------- */
+/* --------- Kill old /threads routes cleanly --------- */
 
-// Create/reuse thread
-app.post("/threads", async (req, res) => {
-  try {
-    const cookies = parseCookies(req.headers.cookie || "");
-    let threadId = cookies[COOKIE_NAME];
-    if (!looksLikeThreadId(threadId)) {
-      threadId = await httpCreateThread();
-      setCookie(res, COOKIE_NAME, threadId);
-    }
-    return res.json({ id: threadId });
-  } catch (e) {
-    const details = e?.response?.data || e?.message || String(e);
-    return errJson(res, e?.response?.status || 500, "OpenAI error", details);
-  }
-});
+// Anything hitting threads* gets a clear 410 Gone with pointer to /api/chat
+function gone(req, res) {
+  res.status(410).json({
+    ok: false,
+    error: "Threads API removed",
+    details: {
+      hint: "Use POST /api/chat with { message } or { messages }.",
+      example: "curl -X POST /api/chat -H 'Content-Type: application/json' --data '{\"message\":\"hi\"}'",
+    },
+  });
+}
+app.post("/threads", gone);
+app.post("/threads/:threadId/messages", gone);
+app.post("/threads/:threadId/runs", gone);
+app.get("/threads/:threadId/runs/:runId", gone);
+app.get("/threads/:threadId/messages", gone);
 
-// Append message (falls back to cookie thread if :threadId bad)
-app.post("/threads/:threadId/messages", async (req, res) => {
-  try {
-    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
-    const text = b.message || b.text || b.input || b.content;
-    if (!text || !String(text).trim()) return errJson(res, 400, "message is required");
-    let { threadId } = req.params;
-    if (!looksLikeThreadId(threadId)) {
-      const cookies = parseCookies(req.headers.cookie || "");
-      threadId = cookies[COOKIE_NAME];
-      if (!looksLikeThreadId(threadId)) threadId = await httpCreateThread();
-      setCookie(res, COOKIE_NAME, threadId);
-    }
-    await httpAddMessage(threadId, text);
-    return res.json({ ok: true, thread_id: threadId });
-  } catch (e) {
-    const details = e?.response?.data || e?.message || String(e);
-    return errJson(res, e?.response?.status || 500, "OpenAI error", details);
-  }
-});
+// If you previously added /api/threads aliases, retire them too:
+app.post(`${API_BASE}/threads`, gone);
+app.post(`${API_BASE}/threads/:threadId/messages`, gone);
+app.post(`${API_BASE}/threads/:threadId/runs`, gone);
+app.get(`${API_BASE}/threads/:threadId/runs/:runId`, gone);
 
-// Start run (optional message in body)
-app.post("/threads/:threadId/runs", async (req, res) => {
-  try {
-    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
-    const text = b.message || b.text || b.input;
-    let { threadId } = req.params;
-    if (!looksLikeThreadId(threadId)) {
-      const cookies = parseCookies(req.headers.cookie || "");
-      threadId = cookies[COOKIE_NAME];
-      if (!looksLikeThreadId(threadId)) threadId = await httpCreateThread();
-      setCookie(res, COOKIE_NAME, threadId);
-    }
-    if (text && String(text).trim()) await httpAddMessage(threadId, text);
-    const runId = await httpStartRun(threadId, b.model);
-    return res.json({ ok: true, thread_id: threadId, run_id: runId, status: "queued" });
-  } catch (e) {
-    const details = e?.response?.data || e?.message || String(e);
-    return errJson(res, e?.response?.status || 500, "OpenAI error", details);
-  }
-});
-
-/* -------------------- 404 + SPA fallback -------------------- */
+/* ----------------- 404 + SPA fallback ----------------- */
 
 app.use((req, res, next) => {
-  if (req.path.startsWith(API_BASE) || req.path.startsWith("/threads")) {
+  if (req.path.startsWith(API_BASE)) {
     return res.status(404).json({ ok: false, error: "Not Found" });
   }
   next();
 });
 
 app.get("*", (req, res, next) => {
-  if (req.path.startsWith(API_BASE) || req.path.startsWith("/threads")) return next();
+  if (req.path.startsWith(API_BASE)) return next();
   const indexPath = path.join(__dirname, "public", "index.html");
   res.sendFile(indexPath, (err) => { if (err) next(); });
 });
 
-/* -------------------- Start -------------------- */
+/* ----------------- Start ----------------- */
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(
-    `[assistant] mode=${ASSISTANT_ID ? "assistant" : "model"} ${ASSISTANT_ID || MODEL} cookie=${COOKIE_NAME} secure=${COOKIE_SECURE}`
-  );
+  console.log(`[chat-only] model=${DEFAULT_MODEL}`);
 });
