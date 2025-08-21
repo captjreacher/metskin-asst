@@ -83,6 +83,9 @@ app.use(express.json({ limit: "2mb" }));
 // Also accept raw text on key chat routes (PowerShell & odd clients)
 app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
 
+// static GUI (served from /public) — NOW it's safe
+app.use(express.static(path.join(__dirname, "public")));
+
 // Optional CORS
 if (ENABLE_CORS) {
   const origin = process.env.CORS_ORIGIN || true; // true = reflect request origin
