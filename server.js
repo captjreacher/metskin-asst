@@ -1,30 +1,31 @@
-// server.js — Metamorphosis Assistant API (ESM, Assistants API v2)
-
 import express from "express";
 import dotenv from "dotenv";
 import OpenAI from "openai";
 
 import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-// serve /index.html and any assets from /public
-import path from "node:path";
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-import cors from "cors"; // safe if not used
-
-app.use(express.static(path.join(__dirname, "public")));
+import cors from "cors"; // optional
 
 dotenv.config();
 
-/* --------------------------- Configuration ------------------------- */
+// Resolve __dirname in ESM
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
 
-const OPENAI_KEY = process.env.OPENAI_API_KEY;
-if (!OPENAI_KEY) {
-  console.error("[BOOT] ❌ Missing OPENAI_API_KEY");
-  process.exit(1);
-}
+// ---- init express BEFORE any app.use/app.get ----
+const app = express();
+app.disable("x-powered-by");
+app.set("trust proxy", true);
+
+// parsers
+app.use(express.json({ limit: "2mb" }));
+app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
+
+// static GUI (served from /public) — NOW it's safe
+app.use(express.static(path.join(__dirname, "public")));
+
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
