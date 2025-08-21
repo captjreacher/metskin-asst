@@ -142,17 +142,18 @@ const headersForLog = (h) => ({
   'Content-Type': h['Content-Type'],
 });
 // ✅ withKnowledge for /v1/responses (assistants=v2 header)
-// - puts vector_store_ids on the file_search tool
-// - does NOT send tool_resources (Responses rejects it)
+// - ensures a file_search tool is present
+// - attaches vector_store_ids via tool_resources
 const withKnowledge = (payload) => {
   const baseTools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
+  const toolResources = payload.tool_resources ? { ...payload.tool_resources } : {};
 
   // Find any existing file_search tool
   const fsIdx = baseTools.findIndex(t => t && t.type === 'file_search');
 
-  // Merge existing tool-level ids with env ids
-  const existingIds = (fsIdx >= 0 && Array.isArray(baseTools[fsIdx].vector_store_ids))
-    ? baseTools[fsIdx].vector_store_ids
+  // Merge existing resource ids with env ids
+  const existingIds = Array.isArray(toolResources?.file_search?.vector_store_ids)
+    ? toolResources.file_search.vector_store_ids
     : [];
 
   const vsIds = Array.from(new Set([
@@ -160,19 +161,15 @@ const withKnowledge = (payload) => {
     ...VECTOR_STORE_IDS,
   ])).filter(Boolean);
 
-  // If we have vector stores, ensure the tool exists and carries them
   if (vsIds.length) {
-    if (fsIdx === -1) {
-      baseTools.push({ type: 'file_search', vector_store_ids: vsIds });
-    } else {
-      baseTools[fsIdx] = { ...baseTools[fsIdx], type: 'file_search', vector_store_ids: vsIds };
-    }
+    if (fsIdx === -1) baseTools.push({ type: 'file_search' });
+    toolResources.file_search = { ...(toolResources.file_search || {}), vector_store_ids: vsIds };
   } else {
-    // No VS configured → don't include file_search to avoid API error
     if (fsIdx >= 0) baseTools.splice(fsIdx, 1);
+    if (toolResources.file_search) delete toolResources.file_search;
   }
 
-  // Whitelist outgoing fields (never attach tool_resources for Responses)
+  // Whitelist outgoing fields
   const {
     model, input, instructions, store, previous_response_id, metadata, assistant_id,
   } = payload;
@@ -186,6 +183,7 @@ const withKnowledge = (payload) => {
     ...(metadata ? { metadata } : {}),
     ...(assistant_id ? { assistant_id } : {}),
     ...(baseTools.length ? { tools: baseTools } : {}),
+    ...(Object.keys(toolResources).length ? { tool_resources: toolResources } : {}),
   };
 };
 
