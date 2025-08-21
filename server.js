@@ -143,7 +143,7 @@ const headersForLog = (h) => ({
 });
 // ✅ withKnowledge for /v1/responses (assistants=v2 header)
 // - ensures a file_search tool is present
-// - attaches vector_store_ids via tool_resources
+// - attaches vector_store_ids directly on the tool (Responses rejects tool_resources)
 const withKnowledge = (payload) => {
   const baseTools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
   const toolResources = payload.tool_resources ? { ...payload.tool_resources } : {};
