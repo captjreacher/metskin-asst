@@ -1,0 +1,30 @@
+--- a/server.js
++++ b/server.js
+@@
+-const port = process.env.PORT || 3000;
+-app.listen(port, () => {
+-  console.log(`✓ Assistant server listening on :${port}`);
+-  console.log(
+-    "[BOOT]",
+-    "ASST_DEFAULT",
+-    ASST_DEFAULT || "(model mode)",
+-    "VS",
+-    VS_IDS.length ? VS_IDS : "(none)",
+-    "tool_resources",
+-    ENABLE_TOOL_RESOURCES ? "enabled" : "disabled"
+-  );
+-});
++const PORT = process.env.PORT || 10000;
++app.listen(PORT, () => {
++  console.log(`Server running on port ${PORT}`);
++  // keep extra startup context if you had it before
++  console.log(
++    "[BOOT]",
++    "ASST_DEFAULT",
++    ASST_DEFAULT || "(model mode)",
++    "VS",
++    VS_IDS.length ? VS_IDS : "(none)",
++    "tool_resources",
++    ENABLE_TOOL_RESOURCES ? "enabled" : "disabled"
++  );
++});
