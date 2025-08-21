@@ -1,5 +1,7 @@
 ﻿// scripts/sync_knowledge_v4.mjs
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config({ path: ".env", override: true });
+
 import OpenAI from "openai";
 import fs from "node:fs";
 import path from "node:path";
