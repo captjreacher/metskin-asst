@@ -167,6 +167,16 @@ app.post(`${API_BASE}/threads/:threadId/messages`, async (req, res) => {
 // Old: POST /api/threads/:threadId/runs  -> run immediately via chat
 app.post(`${API_BASE}/threads/:threadId/runs`, async (req, res) => {
   try {
+    // In this chat-only server, thread_ids are ephemeral. If the client has an old one, reject it.
+    const threadId = req.params.threadId;
+    if (!threadId.startsWith("thread_chat_")) {
+      return res.status(410).json({
+        ok: false,
+        error: "Thread not found or has expired.",
+        details: { thread_id: threadId, code: "thread_gone" },
+      });
+    }
+
     const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
     const text = b.message || b.text || b.input;
     const { answer, model, usage } = await chatComplete({ message: text || "Continue.", model: b.model, system: b.system });
@@ -181,6 +191,16 @@ app.post("/threads", (_req, res) => res.json({ id: fakeThreadId() }));
 app.post("/threads/:threadId/messages", (req, res) => res.json({ ok: true, accepted: true, thread_id: req.params.threadId }));
 app.post("/threads/:threadId/runs", async (req, res) => {
   try {
+    // In this chat-only server, thread_ids are ephemeral. If the client has an old one, reject it.
+    const threadId = req.params.threadId;
+    if (!threadId.startsWith("thread_chat_")) {
+      return res.status(410).json({
+        ok: false,
+        error: "Thread not found or has expired.",
+        details: { thread_id: threadId, code: "thread_gone" },
+      });
+    }
+
     const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
     const text = b.message || b.text || b.input;
     const { answer, model, usage } = await chatComplete({ message: text || "Continue.", model: b.model, system: b.system });
