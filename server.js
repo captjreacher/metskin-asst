@@ -14,6 +14,13 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
+// Get OpenAI key from environment, with fallback to OPENAI_API_KEY
+const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
+if (!OPENAI_KEY) {
+  console.error("FATAL: Missing OPENAI_KEY or OPENAI_API_KEY environment variable");
+  process.exit(1);
+}
+
 
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
