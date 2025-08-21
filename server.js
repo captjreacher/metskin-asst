@@ -1,4 +1,4 @@
-// Metamorphosis Assistant — API Server (Responses v2 + Vector Stores)
+// Metamorphosis Assistant — API Server (Assistants API v2)
 // -------------------------------------------------------------------
 import 'dotenv/config';
 import fs from 'node:fs';
@@ -28,9 +28,8 @@ const vsMulti  = process.env.VECTOR_STORE_IDS ? csv(process.env.VECTOR_STORE_IDS
 const VECTOR_STORE_IDS = Array.from(new Set([...(vsSingle ? [vsSingle] : []), ...vsMulti])).filter(Boolean);
 if (!VECTOR_STORE_IDS.length) console.warn('[BOOT] No vector stores set. Add VECTOR_STORE_ID or VECTOR_STORE_IDS.');
 
-const USE_ASSISTANT = on(process.env.USE_ASSISTANT_ID);
 const ASST_DEFAULT  = process.env.ASST_DEFAULT || '';
-if (USE_ASSISTANT && !ASST_DEFAULT) console.warn('[BOOT] USE_ASSISTANT_ID=true but ASST_DEFAULT is not set.');
+if (!ASST_DEFAULT) console.warn('[BOOT] ASST_DEFAULT is not set.');
 
 const ASST_INSTRUCTIONS = process.env.ASST_INSTRUCTIONS ||
   'You are the Metamorphosis Assistant. Use file_search over the knowledge base to answer accurately and concisely.';
@@ -71,20 +70,6 @@ if (cronExpr) {
 /* ============================= OpenAI (single instance) ============================= */
 const openai = new OpenAI({ apiKey: OPENAI_KEY });
 
-/** Safe message → content blocks */
-const toBlocks = (text) => ([
-  { role: 'user', content: [{ type: 'input_text', text: String(text ?? '') }] },
-]);
-
-/** Lightweight helper (kept for parity) */
-export async function chatWithModel({ message, model = DEFAULT_MODEL }) {
-  const resp = await openai.responses.create({
-    model,
-    input: toBlocks(message),
-  });
-  return resp.output_text;
-}
-
 /* ============================= Express app ============================= */
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -102,16 +87,6 @@ if (on(process.env.ENABLE_CORS)) {
 if (DBG_REQ) app.use((req, _res, next) => { console.log(`[REQ] ${req.method} ${req.url}`); next(); });
 const redact = (x) => { try { return JSON.parse(JSON.stringify(x || {})); } catch { return {}; } };
 
-/** Warn & strip legacy `attachments` on inbound bodies */
-function stripLegacyAttachments(req) {
-  const body = typeof req.body === 'string' ? safeParseJson(req.body) : (req.body || {});
-  if (body && typeof body === 'object' && 'attachments' in body) {
-    console.warn('[WARN] Client sent legacy `attachments`; stripping at ingress.');
-    delete body.attachments;
-  }
-  return body;
-}
-
 if (DBG_BOD) app.use((req, _res, next) => {
   if (req.path === '/assistant/ask' || req.path === '/send') {
     console.log(`[BODY ${req.method} ${req.path}]`, typeof req.body === 'string' ? req.body : redact(req.body));
@@ -127,99 +102,47 @@ app.use((err, _req, res, next) => {
 });
 
 const safeParseJson = (s) => { try { return JSON.parse(s); } catch { return {}; } };
-const bodyObj = (req) => stripLegacyAttachments(req);
-
-/* ============================= Responses API helpers ============================= */
-const RESPONSES_URL = process.env.OPENAI_RESPONSES_URL || 'https://api.openai.com/v1/responses';
-const OA_HEADERS = {
-  Authorization: `Bearer ${OPENAI_KEY}`,
-  'Content-Type': 'application/json',
-  'OpenAI-Beta': 'assistants=v2', // for Responses attachments
-};
-const headersForLog = (h) => ({
-  Authorization: h.Authorization ? `Bearer ${h.Authorization.slice(7, 11)}…` : '(missing)',
-  'OpenAI-Beta': h['OpenAI-Beta'] || '(none)',
-  'Content-Type': h['Content-Type'],
-});
-// ✅ withKnowledge for /v1/responses (assistants=v2 header)
-// - ensures a file_search tool is present
-// - attaches vector_store_ids directly on the tool (Responses rejects tool_resources)
-const withKnowledge = (payload) => {
-  const baseTools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
-  const toolResources = payload.tool_resources ? { ...payload.tool_resources } : {};
-
-  // Find any existing file_search tool
-  const fsIdx = baseTools.findIndex(t => t && t.type === 'file_search');
-
-  // Merge existing resource ids with env ids
-  const existingIds = Array.isArray(toolResources?.file_search?.vector_store_ids)
-    ? toolResources.file_search.vector_store_ids
-    : [];
-
-  const vsIds = Array.from(new Set([
-    ...existingIds,
-    ...VECTOR_STORE_IDS,
-  ])).filter(Boolean);
-
-  if (vsIds.length) {
-    if (fsIdx === -1) baseTools.push({ type: 'file_search' });
-    toolResources.file_search = { ...(toolResources.file_search || {}), vector_store_ids: vsIds };
-  } else {
-    if (fsIdx >= 0) baseTools.splice(fsIdx, 1);
-    if (toolResources.file_search) delete toolResources.file_search;
-  }
-
-  // Whitelist outgoing fields
-  const {
-    model, input, instructions, store, previous_response_id, metadata, assistant_id,
-  } = payload;
-
-  return {
-    model,
-    input,
-    ...(instructions ? { instructions } : {}),
-    ...(store ? { store } : {}),
-    ...(previous_response_id ? { previous_response_id } : {}),
-    ...(metadata ? { metadata } : {}),
-    ...(assistant_id ? { assistant_id } : {}),
-    ...(baseTools.length ? { tools: baseTools } : {}),
-    ...(Object.keys(toolResources).length ? { tool_resources: toolResources } : {}),
-  };
-};
-
-
-async function callResponses(body, { timeoutMs = 45_000 } = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const req = { method: 'POST', headers: OA_HEADERS, body: JSON.stringify(body), signal: controller.signal };
-
-  if (DBG_OA) {
-    console.log('[OA HEADERS]', headersForLog(OA_HEADERS));
-    console.log('[OA⇢]', RESPONSES_URL, '\n' + JSON.stringify(body, null, 2));
-  }
-
-  let resp, raw;
-  try {
-    resp = await fetch(RESPONSES_URL, req);
-    raw = await resp.text();
-  } finally {
-    clearTimeout(timer);
-  }
-  if (DBG_OA) console.log('[OA⇠] HTTP', resp?.status, '\n' + raw);
-
-  let json; try { json = JSON.parse(raw); } catch { json = { error: { message: raw || 'Non-JSON response' } }; }
-  if (!resp.ok) {
-    const msg = json?.error?.message || json?.message || `OpenAI error (HTTP ${resp.status})`;
-    const err = new Error(msg);
-    err.status = resp.status;
-    err.data = json;
-    throw err;
-  }
-  return json;
+const bodyObj = (req) => {
+    const body = typeof req.body === 'string' ? safeParseJson(req.body) : (req.body || {});
+    // No longer need stripLegacyAttachments as we are not using it.
+    return body;
 }
 
+/* ============================= Assistants API v2 helpers ============================= */
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function getAssistantResponse(threadId, runId) {
+    let runStatus;
+    do {
+        await sleep(1000); // Poll every second
+        const run = await openai.beta.threads.runs.retrieve(threadId, runId);
+        runStatus = run.status;
+        if (DBG_OA) console.log(`[OA] Run status for ${runId}: ${runStatus}`);
+    } while (runStatus === 'queued' || runStatus === 'in_progress');
+
+    if (runStatus === 'completed') {
+        const messages = await openai.beta.threads.messages.list(threadId);
+        const lastMessage = messages.data.find(m => m.run_id === runId && m.role === 'assistant');
+        if (lastMessage) {
+            const content = lastMessage.content[0];
+            if(content.type === 'text') {
+                return content.text.value;
+            }
+        }
+        return '';
+    } else {
+        const run = await openai.beta.threads.runs.retrieve(threadId, runId);
+        const errorMessage = run.last_error ? run.last_error.message : `Run failed with status: ${runStatus}`;
+        throw new Error(errorMessage);
+    }
+}
+
+
 /* ============================= Thread state ============================= */
-const lastResponseIdByThread = new Map();
+// This is not a robust way to handle thread state in a production server.
+// For a real application, you would want to store this in a database.
+const threadStore = new Map();
 
 /* ============================= Routes ============================= */
 app.get('/health', (_req, res) => {
@@ -234,84 +157,68 @@ app.get('/health', (_req, res) => {
       OPENAI_API_KEY: OPENAI_KEY ? 'set' : 'missing',
       OPENAI_MODEL: DEFAULT_MODEL,
       VECTOR_STORE_IDS,
-      USE_ASSISTANT_ID: USE_ASSISTANT,
-      ASST_DEFAULT: USE_ASSISTANT ? (ASST_DEFAULT ? 'set' : 'missing') : '(not used)',
+      ASST_DEFAULT: ASST_DEFAULT ? 'set' : 'missing',
       DEBUG: { DEBUG_LOG_REQUESTS: DBG_REQ, DEBUG_LOG_BODIES: DBG_BOD, DEBUG_OPENAI: DBG_OA },
       SYNC_CRON: cronExpr || null,
-      NEED_BETA: true,
       ENABLE_CORS: on(process.env.ENABLE_CORS),
     },
   });
 });
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-app.get('/start-chat', (_req, res) => res.json({ ok: true, thread_id: crypto.randomUUID() }));
-
-// First turn
-app.post('/assistant/ask', async (req, res) => {
-  try {
-    const body = bodyObj(req);
-    const { message, text, model, thread_id } = body;
-    const userText = (typeof message === 'string' && message) || (typeof text === 'string' && text) || '';
-    if (!userText) return res.status(400).json({ ok: false, error: "Field 'message' (or 'text') is required" });
-
-    const prior = thread_id ? lastResponseIdByThread.get(thread_id) : undefined;
-
-    const payload = withKnowledge({
-      model: model || DEFAULT_MODEL,
-      instructions: ASST_INSTRUCTIONS,
-      input: toBlocks(userText),
-      store: true,
-      ...(prior ? { previous_response_id: prior } : {}),
-      ...(USE_ASSISTANT && ASST_DEFAULT ? { assistant_id: ASST_DEFAULT } : {}),
-    });
-
-    const data = await callResponses(payload);
-    if (thread_id && data?.id) lastResponseIdByThread.set(thread_id, data.id);
-
-    const answer =
-      data?.output_text ??
-      (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ??
-      '';
-    res.json({ ok: true, answer, data_id: data?.id ?? null });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
-  }
+app.get('/start-chat', async (_req, res) => {
+    try {
+        const thread = await openai.beta.threads.create();
+        threadStore.set(thread.id, thread);
+        res.json({ ok: true, thread_id: thread.id });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
 });
 
-// Follow-ups
-app.post('/send', async (req, res) => {
-  try {
-    const body = bodyObj(req);
-    const { thread_id, thread, text, message, model } = body;
-    const conv = (typeof thread_id === 'string' && thread_id) || (typeof thread === 'string' && thread) || '';
-    const userText = (typeof text === 'string' && text) || (typeof message === 'string' && message) || '';
-    if (!conv)     return res.status(400).json({ ok: false, error: "Field 'thread_id' (or 'thread') is required" });
-    if (!userText) return res.status(400).json({ ok: false, error: "Field 'text' (or 'message') is required" });
+// First turn and follow-ups are handled by the same logic now
+async function handleChat(req, res) {
+    try {
+        const body = bodyObj(req);
+        let { thread_id, message, text, model } = body;
+        const userText = message || text || '';
+        if (!userText) return res.status(400).json({ ok: false, error: "Field 'message' (or 'text') is required" });
 
-    const prior = lastResponseIdByThread.get(conv);
+        if (!thread_id) {
+            const thread = await openai.beta.threads.create();
+            thread_id = thread.id;
+        }
 
-    const payload = withKnowledge({
-      model: model || DEFAULT_MODEL,
-      instructions: ASST_INSTRUCTIONS,
-      input: toBlocks(userText),
-      store: true,
-      ...(prior ? { previous_response_id: prior } : {}),
-      ...(USE_ASSISTANT && ASST_DEFAULT ? { assistant_id: ASST_DEFAULT } : {}),
-    });
+        await openai.beta.threads.messages.create(thread_id, {
+            role: 'user',
+            content: userText,
+        });
 
-    const data = await callResponses(payload);
-    if (data?.id) lastResponseIdByThread.set(conv, data.id);
+        const toolResources = VECTOR_STORE_IDS.length > 0 ? {
+            file_search: {
+                vector_store_ids: VECTOR_STORE_IDS
+            }
+        } : {};
 
-    const msg =
-      data?.output_text ??
-      (Array.isArray(data?.output) && data.output[0]?.content?.[0]?.text) ??
-      '';
-    res.json({ ok: true, message: msg, data_id: data?.id ?? null });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
-  }
-});
+        const run = await openai.beta.threads.runs.create(thread_id, {
+            assistant_id: ASST_DEFAULT,
+            model: model || DEFAULT_MODEL,
+            instructions: ASST_INSTRUCTIONS,
+            tools: [{ type: 'file_search' }],
+            tool_resources: toolResources,
+        });
+
+        const answer = await getAssistantResponse(thread_id, run.id);
+
+        res.json({ ok: true, answer: answer, data_id: run.id, thread_id: thread_id });
+    } catch (e) {
+        res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
+    }
+}
+
+app.post('/assistant/ask', handleChat);
+app.post('/send', handleChat);
+
 
 // Dev token (optional)
 app.post('/dev/make-token', (req, res) => {
@@ -368,5 +275,5 @@ app.use((_req, res) => res.status(404).json({ ok: false, error: 'Not Found' }));
 const PORT = process.env.PORT || 10000; // Render injects PORT
 app.listen(PORT, () => {
   console.log(`✓ Assistant server listening on :${PORT}`);
-  console.log('[BOOT] Node', process.version, 'USE_ASSISTANT_ID', USE_ASSISTANT, 'VS', VECTOR_STORE_IDS);
+  console.log('[BOOT] Node', process.version, 'ASST_DEFAULT', ASST_DEFAULT, 'VS', VECTOR_STORE_IDS);
 });
