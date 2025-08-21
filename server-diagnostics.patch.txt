@@ -1,0 +1,100 @@
+--- a/server.js
++++ b/server.js
+@@
+ // --------------------------- Helpers -----------------------------
+@@
+ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+ 
++function sendOpenAiError(res, e, where = "unknown") {
++  const status = e?.status || e?.response?.status || 500;
++  const payload = e?.response?.data || e?.error || e?.message || String(e);
++  console.error(`[ERR ${where}]`, payload);
++  return res.status(status).json({ ok: false, error: e?.message || "OpenAI error", details: payload });
++}
++
+ async function ensureThreadId(req, res) {
+@@
+ }
+ 
+ async function startRun(threadId, modelOverride) {
+   if (ASSISTANT_ID) {
+     return openai.beta.threads.runs.create(threadId, {
+       assistant_id: ASSISTANT_ID,
+     });
+   }
+   return openai.beta.threads.runs.create(threadId, {
+     model: modelOverride || MODEL,
+     instructions: INSTRUCTIONS,
+   });
+ }
+ 
+-async function waitForRun(threadId, runId, timeoutMs = 60_000) {
+-  const start = Date.now();
+-  while (Date.now() - start < timeoutMs) {
+-    const r = await openai.beta.threads.runs.retrieve(threadId, runId);
+-    if (r.status !== "queued" && r.status !== "in_progress") return r;
+-    await sleep(850);
+-  }
+-  throw new Error("Run timed out");
+-}
++async function waitForRun(threadId, runId, timeoutMs = 60_000) {
++  const start = Date.now();
++  while (Date.now() - start < timeoutMs) {
++    const r = await openai.beta.threads.runs.retrieve(threadId, runId);
++    if (r.status === "queued" || r.status === "in_progress") {
++      await sleep(850);
++      continue;
++    }
++    if (r.status === "requires_action") {
++      // Your Assistant is asking for tool outputs (e.g., file_search/code).
++      const hint = "Run requires tool outputs. Either disable tools on the Assistant, set ENABLE_TOOL_RESOURCES=1 with VECTOR_STORE_IDS, or unset OPENAI_ASSISTANT_ID to use model mode.";
++      const err = new Error("requires_action");
++      err.details = { required_action: r.required_action, hint };
++      throw err;
++    }
++    return r; // completed/failed/cancelled/etc.
++  }
++  const err = new Error("Run timed out");
++  err.details = { hint: "If using Assistant tools, see requires_action note above." };
++  throw err;
++}
+@@
+ // ----------------------------- API --------------------------------
+ 
+ // One-shot: create/reuse thread (cookie), add message, start run, wait, reply
+ app.post(`${API_BASE}/run`, async (req, res) => {
+   try {
+@@
+-    await waitForRun(threadId, run.id);
++    await waitForRun(threadId, run.id);
+     const answer = await getRunAnswer(threadId, run.id);
+ 
+     res.json({ ok: true, answer, thread_id: threadId, run_id: run.id });
+   } catch (e) {
+-    console.error("[/api/run] error:", e);
+-    res.status(500).json({ ok: false, error: e.message });
++    return sendOpenAiError(res, e, "/api/run");
+   }
+ });
+ 
++// Quick key/egress self-test (no Threads)
++app.post(`${API_BASE}/selftest`, async (_req, res) => {
++  try {
++    const r = await fetch("https://api.openai.com/v1/chat/completions", {
++      method: "POST",
++      headers: {
++        Authorization: `Bearer ${OPENAI_KEY}`,
++        "Content-Type": "application/json",
++      },
++      body: JSON.stringify({
++        model: "gpt-4o-mini",
++        messages: [{ role: "user", content: "Hello" }],
++      }),
++    });
++    const data = await r.json();
++    if (!r.ok) return res.status(r.status).json({ ok: false, error: data?.error?.message || "OpenAI error", details: data });
++    return res.json({ ok: true, answer: data?.choices?.[0]?.message?.content ?? "" });
++  } catch (e) {
++    return sendOpenAiError(res, e, "/api/selftest");
++  }
++});
