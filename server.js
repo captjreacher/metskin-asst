@@ -1,5 +1,5 @@
 // server.js
-// Minimal Express + OpenAI Chat Completions ONLY (no Threads/Assistants)
+// Chat Completions only (no Threads/Assistants) + legacy route adapters
 // Node 20+, ESM ("type": "module" in package.json)
 
 import express from "express";
@@ -20,10 +20,10 @@ const API_BASE = process.env.API_BASE_PATH || "/api";
 const OPENAI_KEY =
   process.env.OPENAI_API_KEY ||
   process.env.OPENAI_KEY ||
-  process.env.OPENAI; // last-resort env name
+  process.env.OPENAI;
 
 if (!OPENAI_KEY) {
-  console.error("FATAL: Missing OPENAI_API_KEY/OPENAI_KEY env var.");
+  console.error("FATAL: Missing OPENAI_API_KEY / OPENAI_KEY");
   process.exit(1);
 }
 
@@ -39,7 +39,7 @@ app.set("trust proxy", true);
 app.use(express.json({ limit: "2mb" }));
 app.use(express.text({ type: "*/*", limit: "1mb" }));
 
-// Static UI if you have one
+// Static UI (optional)
 app.use(express.static(path.join(__dirname, "public")));
 
 /* ----------------- Health ----------------- */
@@ -47,12 +47,11 @@ app.use(express.static(path.join(__dirname, "public")));
 app.get("/health", (_req, res) => res.status(200).send("ok"));
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
-/* ------------- OpenAI helpers ------------- */
+/* ------------- OpenAI helper ------------- */
 
 const OPENAI_BASE = "https://api.openai.com/v1";
 const OPENAI_BEARER = `Bearer ${OPENAI_KEY}`;
 
-// One-shot chat completion (no memory, no threads)
 async function chatComplete({ message, messages, model, system, temperature, top_p }) {
   // Build messages array
   let msgs = Array.isArray(messages) ? messages : [];
@@ -89,9 +88,9 @@ async function chatComplete({ message, messages, model, system, temperature, top
   return { answer, usage: data?.usage ?? null, model: body.model };
 }
 
-/* ----------------- API ----------------- */
+/* ----------------- Primary API ----------------- */
 
-// Self-test: verifies key & egress without any client input
+// Self-test (quick project-key/egress check)
 app.post(`${API_BASE}/selftest`, async (_req, res) => {
   try {
     const { answer, model } = await chatComplete({ message: "Hello" });
@@ -107,21 +106,14 @@ app.post(`${API_BASE}/selftest`, async (_req, res) => {
 
 /**
  * POST /api/chat
- * Body options:
- * - text/plain: the body IS the user message (simplest)
- * - application/json:
- *   {
- *     "message": "hi",              // single-shot
- *     "messages": [...],            // full chat history array (role/content)
- *     "system": "You are helpful",  // optional system prompt
- *     "model": "gpt-4o-mini",       // optional
- *     "temperature": 0.7,           // optional
- *     "top_p": 1                    // optional
- *   }
+ * Body:
+ *   - text/plain: body is the user message
+ *   - application/json:
+ *       { "message": "hi" }
+ *       { "messages": [{role, content}, ...], "system": "...", "model": "...", ... }
  */
 app.post(`${API_BASE}/chat`, async (req, res) => {
   try {
-    // Accept both JSON bodies and raw text
     const isString = typeof req.body === "string";
     const b = isString ? { message: req.body } : (req.body || {});
     const { answer, model, usage } = await chatComplete(b);
@@ -135,30 +127,68 @@ app.post(`${API_BASE}/chat`, async (req, res) => {
   }
 });
 
-/* --------- Kill old /threads routes cleanly --------- */
+/* -------- Legacy adapters (keep old frontends working) -------- */
 
-// Anything hitting threads* gets a clear 410 Gone with pointer to /api/chat
-function gone(req, res) {
-  res.status(410).json({
-    ok: false,
-    error: "Threads API removed",
-    details: {
-      hint: "Use POST /api/chat with { message } or { messages }.",
-      example: "curl -X POST /api/chat -H 'Content-Type: application/json' --data '{\"message\":\"hi\"}'",
-    },
-  });
-}
-app.post("/threads", gone);
-app.post("/threads/:threadId/messages", gone);
-app.post("/threads/:threadId/runs", gone);
-app.get("/threads/:threadId/runs/:runId", gone);
-app.get("/threads/:threadId/messages", gone);
+// Generate a harmless thread-like id so UIs expecting it don’t break
+const fakeThreadId = () => `thread_chat_${Math.random().toString(36).slice(2, 10)}`;
 
-// If you previously added /api/threads aliases, retire them too:
-app.post(`${API_BASE}/threads`, gone);
-app.post(`${API_BASE}/threads/:threadId/messages`, gone);
-app.post(`${API_BASE}/threads/:threadId/runs`, gone);
-app.get(`${API_BASE}/threads/:threadId/runs/:runId`, gone);
+// Old: POST /api/run  with { message, thread_id? }
+app.post(`${API_BASE}/run`, async (req, res) => {
+  try {
+    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const text = b.message || b.text || b.input;
+    if (!text || !String(text).trim()) return res.status(400).json({ ok: false, error: "message is required" });
+
+    const { answer, model, usage } = await chatComplete({ message: text, model: b.model, system: b.system });
+    res.json({ ok: true, answer, model, usage, thread_id: b.thread_id ?? null, run_id: null, mode: "chat" });
+  } catch (e) {
+    res.status(e?.response?.status || 500).json({ ok: false, error: e.message, details: e?.response?.data ?? null });
+  }
+});
+
+// Old: POST /api/threads  -> return a fake id
+app.post(`${API_BASE}/threads`, (_req, res) => {
+  res.json({ id: fakeThreadId() });
+});
+
+// Old: POST /api/threads/:threadId/messages  (no-op accept)
+app.post(`${API_BASE}/threads/:threadId/messages`, async (req, res) => {
+  try {
+    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const text = b.message || b.text || b.input || b.content;
+    if (!text || !String(text).trim()) return res.status(400).json({ ok: false, error: "message is required" });
+    // No state kept; just acknowledge
+    res.json({ ok: true, accepted: true, thread_id: req.params.threadId });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Old: POST /api/threads/:threadId/runs  -> run immediately via chat
+app.post(`${API_BASE}/threads/:threadId/runs`, async (req, res) => {
+  try {
+    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const text = b.message || b.text || b.input;
+    const { answer, model, usage } = await chatComplete({ message: text || "Continue.", model: b.model, system: b.system });
+    res.json({ ok: true, answer, model, usage, thread_id: req.params.threadId, run_id: null, status: "completed", mode: "chat" });
+  } catch (e) {
+    res.status(e?.response?.status || 500).json({ ok: false, error: e.message, details: e?.response?.data ?? null });
+  }
+});
+
+// (Optional) non-API legacy routes if some pages still call them
+app.post("/threads", (_req, res) => res.json({ id: fakeThreadId() }));
+app.post("/threads/:threadId/messages", (req, res) => res.json({ ok: true, accepted: true, thread_id: req.params.threadId }));
+app.post("/threads/:threadId/runs", async (req, res) => {
+  try {
+    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const text = b.message || b.text || b.input;
+    const { answer, model, usage } = await chatComplete({ message: text || "Continue.", model: b.model, system: b.system });
+    res.json({ ok: true, answer, model, usage, thread_id: req.params.threadId, run_id: null, status: "completed", mode: "chat" });
+  } catch (e) {
+    res.status(e?.response?.status || 500).json({ ok: false, error: e.message, details: e?.response?.data ?? null });
+  }
+});
 
 /* ----------------- 404 + SPA fallback ----------------- */
 
