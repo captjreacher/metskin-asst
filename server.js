@@ -81,7 +81,7 @@ app.use(express.static(path.join(__dirname, "public")));
 // JSON for most routes
 app.use(express.json({ limit: "2mb" }));
 // Also accept raw text on key chat routes (PowerShell & odd clients)
-app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
+app.use(["/send"], express.text({ type: "*/*", limit: "1mb" }));
 
 // static GUI (served from /public) — NOW it's safe
 app.use(express.static(path.join(__dirname, "public")));
@@ -218,6 +218,7 @@ app.post("/assistant/ask", async (req, res) => {
     catch { b = { message: String(req.body || "") }; }
 
     let { thread_id, message, text, model } = b;
+    console.log(`[DEBUG] Received thread_id: ${thread_id}`);
     const userText = message || text || "";
     if (!userText) return res.status(400).json({ ok: false, error: "Field 'message' (or 'text') is required" });
 
@@ -246,6 +247,7 @@ app.post("/assistant/ask", async (req, res) => {
 
     const run = await openai.beta.threads.runs.create(thread_id, payload);
     const run_id = run.id;
+    console.log(`[DEBUG] Created run_id: ${run_id}`);
     if (!run_id?.startsWith("run_")) {
       return res.status(502).json({ ok: false, error: "OpenAI returned unexpected run id", got: run_id });
     }
