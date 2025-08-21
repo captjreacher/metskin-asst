@@ -19,6 +19,7 @@
         "express": "^4.21.2",
         "glob": "^11.0.3",
         "jsonwebtoken": "^9.0.2",
+        "morgan": "^1.10.1",
         "node-cron": "^4.2.1",
         "node-fetch": "^3.3.2",
         "notion-to-md": "^3.1.9",
