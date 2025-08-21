@@ -1,404 +1,331 @@
 // server.js
-// Metamorphosis Assistant – Express + OpenAI Threads API
-// Node 20+ (ESM)
+// Express + OpenAI Threads via REST (no SDK positional args)
+// Node 20+, ESM ("type": "module")
 
 import express from "express";
-import dotenv from "dotenv";
-import OpenAI from "openai";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import cors from "cors";
-import fs from "node:fs";
-import { spawn } from "node:child_process";
+import dotenv from "dotenv";
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const on = (v) => /^(1|true|yes|on)$/i.test(String(v ?? ""));
+/* -------------------- Config -------------------- */
 
-const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
+const PORT = process.env.PORT || 10000;
+const API_BASE = process.env.API_BASE_PATH || "/api";
+
+const OPENAI_KEY =
+  process.env.OPENAI_API_KEY ||
+  process.env.OPENAI_KEY ||
+  process.env.OPENAI; // last resort
+
 if (!OPENAI_KEY) {
-  console.error("FATAL: Missing OPENAI_KEY / OPENAI_API_KEY");
+  console.error("FATAL: Missing OPENAI_API_KEY/OPENAI_KEY");
   process.exit(1);
 }
 
-const API_BASE = process.env.API_BASE_PATH || "/api";
-const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const ASSISTANT_ID =
+  process.env.OPENAI_ASSISTANT_ID || process.env.ASST_DEFAULT || "";
 
-// If you have a pre-built Assistant, set ASST_DEFAULT (or OPENAI_ASSISTANT_ID)
-// and we’ll run with that; otherwise we call the model directly.
-const ASST_DEFAULT =
-  process.env.ASST_DEFAULT || process.env.OPENAI_ASSISTANT_ID || "";
-
-// Optional file_search wiring (Vector Store IDs). Disabled by default to avoid
-// “Unknown parameter: tool_resources” on older/staged APIs. Flip flag to enable.
-const ENABLE_TOOL_RESOURCES = on(process.env.ENABLE_TOOL_RESOURCES || "0");
-const VS_IDS = Array.from(
-  new Set(
-    (process.env.VECTOR_STORE_IDS || process.env.VECTOR_STORE_ID || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-  )
-);
-
-const ENABLE_CORS = on(process.env.ENABLE_CORS || "1");
-const HEALTH_LOG_SAMPLE_MS = Number(process.env.HEALTH_LOG_SAMPLE_MS || 60_000);
-const ADMIN_TOKEN = process.env.ADMIN_API_TOKEN || process.env.JWT_SECRET || "";
-const SYNC_CRON = (process.env.SYNC_CRON || "").trim();
-
-const ASST_INSTRUCTIONS =
+const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const INSTRUCTIONS =
   process.env.ASST_INSTRUCTIONS ||
-  [
-    "You are the Metamorphosis Product Assistant.",
-    "Use file_search over the knowledge base to answer accurately and concisely.",
-    "If the user says 'metskin-asst training status', reply exactly:",
-    "Fully Trained and Reporting for Duty Captain",
-  ].join(" ");
+  "You are the Metamorphosis Assistant. Be concise, accurate, and helpful.";
 
-/* ------------------------------ App --------------------------------- */
+const COOKIE_NAME = process.env.THREAD_COOKIE_NAME || "assistant_thread_id";
+const COOKIE_SECURE =
+  /^(1|true|yes|on)$/i.test(String(process.env.COOKIE_SECURE || "")) ||
+  process.env.NODE_ENV === "production";
+
+/* -------------------- App -------------------- */
 
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", true);
 
-// static GUI (served from /public) — NOW it's safe
-app.use(express.static(path.join(__dirname, "public")));
-
-// JSON for most routes
-app.use(express.json({ limit: "2mb" }));
-// Also accept raw text on key chat routes (PowerShell & odd clients)
-app.use(["/send"], express.text({ type: "*/*", limit: "1mb" }));
-
-// Accept JSON and raw text (handy for curl/PowerShell posting plain strings)
 app.use(express.json({ limit: "2mb" }));
 app.use(express.text({ type: "*/*", limit: "1mb" }));
 
-// Serve static UI from /public at /
+// Static UI
 app.use(express.static(path.join(__dirname, "public")));
 
-/* ------------------------------ Health ------------------------------ */
-
-let lastHealthLog = 0;
-app.get("/health", (_req, res) => {
-  const now = Date.now();
-  if (now - lastHealthLog >= HEALTH_LOG_SAMPLE_MS) {
-    lastHealthLog = now;
-    console.log(`[health] ok ${new Date().toISOString()}`);
-  }
-  res.status(200).send("ok");
-});
+// Health
+app.get("/health", (_req, res) => res.status(200).send("ok"));
 app.get("/healthz", (_req, res) => res.json({ ok: true }));
 
-/* ---------------------------- OpenAI SDK ---------------------------- */
+/* -------------------- Helpers -------------------- */
 
-const openai = new OpenAI({ apiKey: OPENAI_KEY });
-
-/* ----------------------------- Helpers ------------------------------ */
+const OPENAI_BASE = "https://api.openai.com/v1";
+const OPENAI_BEARER = `Bearer ${OPENAI_KEY}`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const looksLikeThreadId = (v) => typeof v === "string" && /^thread_[A-Za-z0-9]/.test(v);
+const looksLikeRunId = (v) => typeof v === "string" && /^run_[A-Za-z0-9]/.test(v);
 
-const safeParseJson = (s) => {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return {};
+function parseCookies(header) {
+  const out = {};
+  if (!header) return out;
+  for (const p of header.split(";")) {
+    const s = p.trim();
+    const i = s.indexOf("=");
+    if (i > -1) out[s.slice(0, i)] = decodeURIComponent(s.slice(i + 1));
   }
-};
-const bodyObj = (req) =>
-  typeof req.body === "string" ? safeParseJson(req.body) : req.body || {};
-
-// Some hosted SDKs changed prefixes in the past. Keep validation permissive.
-const looksLikeId = (val, expectedPrefix) =>
-  typeof val === "string" &&
-  val.length > expectedPrefix.length + 6 && // cheap length check
-  val.startsWith(expectedPrefix);
-
-const isBad = (v) =>
-  v == null ||
-  v === "" ||
-  v === "undefined" ||
-  v === "null" ||
-  (typeof v === "string" && v.trim() === "");
-
-// Optional tools / tool_resources
-const getTools = () => [{ type: "file_search" }];
-const getToolResources = () => {
-  if (!ENABLE_TOOL_RESOURCES) return undefined;
-  if (!VS_IDS.length) return undefined;
-  return { file_search: { vector_store_ids: VS_IDS } };
-};
-
-// Create a thread (helper)
-async function createThread() {
-  const t = await openai.beta.threads.create();
-  return t.id;
+  return out;
 }
 
-async function addUserMessage(threadId, text) {
-  if (isBad(threadId)) throw new Error("Missing threadId");
-  if (isBad(text)) return;
-  await openai.beta.threads.messages.create(threadId, {
-    role: "user",
-    content: String(text),
+function setCookie(res, name, value, opts = {}) {
+  const {
+    httpOnly = true,
+    sameSite = "Lax",
+    secure = COOKIE_SECURE,
+    path = "/",
+    maxAge = 60 * 60 * 24 * 14, // 14 days
+  } = opts;
+  const parts = [`${name}=${encodeURIComponent(value)}`, `Path=${path}`];
+  if (httpOnly) parts.push("HttpOnly");
+  if (secure) parts.push("Secure");
+  if (sameSite) parts.push(`SameSite=${sameSite}`);
+  if (maxAge) parts.push(`Max-Age=${maxAge}`);
+  res.append("Set-Cookie", parts.join("; "));
+}
+
+function errJson(res, status, msg, details) {
+  return res.status(status).json({ ok: false, error: msg, details: details ?? null });
+}
+
+async function httpJson(url, init) {
+  const r = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: OPENAI_BEARER,
+      "Content-Type": "application/json",
+      ...(init?.headers || {}),
+    },
   });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const msg = data?.error?.message || `${r.status} ${r.statusText}`;
+    const e = new Error(msg);
+    e.response = { status: r.status, data };
+    throw e;
+  }
+  return data;
 }
 
-async function startRun(threadId, modelOverride) {
-  const tool_resources = getToolResources();
-  if (ASST_DEFAULT) {
-    return openai.beta.threads.runs.create(threadId, {
-      assistant_id: ASST_DEFAULT,
-      tools: getTools(),
-      ...(tool_resources ? { tool_resources } : {}),
-    });
-  }
-  return openai.beta.threads.runs.create(threadId, {
-    model: modelOverride || DEFAULT_MODEL,
-    instructions: ASST_INSTRUCTIONS,
-    tools: getTools(),
-    ...(tool_resources ? { tool_resources } : {}),
+// 1) Create thread
+async function httpCreateThread() {
+  const j = await httpJson(`${OPENAI_BASE}/threads`, {
+    method: "POST",
+    body: JSON.stringify({}),
   });
+  return j.id; // "thread_..."
 }
 
-/* ----------------------------- API: Threads ------------------------- */
-
-// POST /api/threads  -> { id, ... }
-app.post(`${API_BASE}/threads`, async (_req, res) => {
-  try {
-    const id = await createThread();
-    res.json({ id });
-  } catch (e) {
-    console.error("Create thread error:", e);
-    res.status(e.status || 500).json({ error: e.message });
-  }
-});
-
-// POST /api/threads/:threadId/messages  -> append a user message
-app.post(`${API_BASE}/threads/:threadId/messages`, async (req, res) => {
-  try {
-    const { threadId } = req.params;
-    if (isBad(threadId) || !looksLikeId(threadId, "thread_")) {
-      return res.status(400).json({ error: "Invalid threadId" });
-    }
-    const b = bodyObj(req);
-    const text = b.content || b.message || b.text || "";
-    if (isBad(text)) return res.status(400).json({ error: "Missing message text" });
-
-    const msg = await openai.beta.threads.messages.create(threadId, {
+// 2) Add message
+async function httpAddMessage(threadId, text) {
+  return httpJson(`${OPENAI_BASE}/threads/${encodeURIComponent(threadId)}/messages`, {
+    method: "POST",
+    body: JSON.stringify({
       role: "user",
-      content: text,
-    });
-    res.json(msg);
-  } catch (e) {
-    console.error("Add message error:", e);
-    res.status(e.status || 500).json({ error: e.message });
+      content: String(text),
+    }),
+  });
+}
+
+// 3) Start run (assistant or model mode)
+async function httpStartRun(threadId, modelOverride) {
+  const body = ASSISTANT_ID
+    ? { assistant_id: ASSISTANT_ID }
+    : { model: modelOverride || MODEL, instructions: INSTRUCTIONS };
+  const j = await httpJson(
+    `${OPENAI_BASE}/threads/${encodeURIComponent(threadId)}/runs`,
+    { method: "POST", body: JSON.stringify(body) }
+  );
+  return j.id; // run_id
+}
+
+// 4) Poll run
+async function httpWaitRun(threadId, runId, timeoutMs = 60_000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const j = await httpJson(
+      `${OPENAI_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}`,
+      { method: "GET" }
+    );
+    const s = j.status;
+    if (s === "queued" || s === "in_progress") {
+      await sleep(850);
+      continue;
+    }
+    if (s === "requires_action") {
+      const e = new Error("requires_action");
+      e.details = { required_action: j.required_action };
+      throw e;
+    }
+    return j; // completed/failed/cancelled/expired
   }
-});
+  throw new Error("Run timed out");
+}
 
-// POST /api/threads/:threadId/runs  -> start run (optionally accepts {message})
-app.post(`${API_BASE}/threads/:threadId/runs`, async (req, res) => {
+// 5) Read answer
+async function httpGetAnswer(threadId, runId) {
+  const j = await httpJson(
+    `${OPENAI_BASE}/threads/${encodeURIComponent(threadId)}/messages?order=desc&limit=20`,
+    { method: "GET" }
+  );
+  const msg = j.data.find((m) => m.role === "assistant" && m.run_id === runId);
+  const part = msg?.content?.find((c) => c.type === "text");
+  return part?.text?.value || "";
+}
+
+/* -------------------- API (cookie-scoped) -------------------- */
+
+// Self-test (no Threads) — proves key + egress
+app.post(`${API_BASE}/selftest`, async (_req, res) => {
   try {
-    let { threadId } = req.params;
-
-    // Guard against “undefined/null” in the URL (common client bug)
-    if (isBad(threadId) || !looksLikeId(threadId, "thread_")) {
-      return res.status(400).json({
-        error:
-          "Missing or invalid threadId. Create a thread first or use /api/run to auto-create.",
-      });
-    }
-
-    const b = bodyObj(req);
-    const userText = b.message || b.text || b.input || "";
-
-    if (!isBad(userText)) {
-      await addUserMessage(threadId, userText);
-    }
-
-    const run = await startRun(threadId, b.model);
-    res.json(run);
-  } catch (e) {
-    console.error("Start run error:", e);
-    res.status(e.status || 500).json({ error: e.message, details: e.data ?? null });
-  }
-});
-
-// GET /api/threads/:threadId/runs/:runId  -> retrieve run
-app.get(`${API_BASE}/threads/:threadId/runs/:runId`, async (req, res) => {
-  try {
-    const { threadId, runId } = req.params;
-    if (isBad(threadId) || !looksLikeId(threadId, "thread_")) {
-      return res.status(400).json({ error: "Invalid threadId" });
-    }
-    if (isBad(runId) || !looksLikeId(runId, "run_")) {
-      return res.status(400).json({ error: "Invalid runId" });
-    }
-    const run = await openai.beta.threads.runs.retrieve(threadId, runId);
-    res.json(run);
-  } catch (e) {
-    console.error("Retrieve run error:", e);
-    res.status(e.status || 500).json({ error: e.message, details: e.data ?? null });
-  }
-});
-
-// GET /api/threads/:threadId/messages -> list messages (handy for debugging)
-app.get(`${API_BASE}/threads/:threadId/messages`, async (req, res) => {
-  try {
-    const { threadId } = req.params;
-    if (isBad(threadId) || !looksLikeId(threadId, "thread_")) {
-      return res.status(400).json({ error: "Invalid threadId" });
-    }
-    const msgs = await openai.beta.threads.messages.list(threadId);
-    res.json(msgs);
-  } catch (e) {
-    console.error("List messages error:", e);
-    res.status(e.status || 500).json({ error: e.message });
-  }
-});
-
-/* ---------------- Convenience: Create/Run/Poll in one ---------------- */
-
-// POST /api/run
-// Body: { message: string, thread_id?: string, model?: string }
-// → auto-creates a thread if missing, appends message, starts run, polls to done,
-//   returns { ok, answer, thread_id, run_id }
-app.post(`${API_BASE}/run`, async (req, res) => {
-  try {
-    const b = bodyObj(req);
-    let { thread_id: threadId, message, text, input, model } = b || {};
-    const userText = message || text || input || "";
-
-    if (isBad(userText)) {
-      return res.status(400).json({ ok: false, error: "Field 'message' (or 'text'/'input') is required" });
-    }
-
-    if (isBad(threadId) || !looksLikeId(threadId, "thread_")) {
-      threadId = await createThread();
-    }
-
-    await addUserMessage(threadId, userText);
-    const run = await startRun(threadId, model);
-    const runId = run.id;
-
-    // Poll until done (avoid log spam)
-    let status = run.status;
-    while (status === "queued" || status === "in_progress") {
-      await sleep(900);
-      const r = await openai.beta.threads.runs.retrieve(threadId, runId);
-      status = r.status;
-    }
-
-    // Fetch latest assistant message for this run
-    const msgs = await openai.beta.threads.messages.list(threadId);
-    const last = msgs.data.find((m) => m.role === "assistant" && m.run_id === runId);
-    const answer = last?.content?.find((c) => c.type === "text")?.text?.value ?? "";
-
-    return res.json({ ok: true, answer, thread_id: threadId, run_id: runId });
-  } catch (e) {
-    console.error("One-shot run error:", e);
-    return res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
-  }
-});
-
-/* ----------------------- Simple Chat Probe (no Threads) -------------- */
-
-// POST /api/chat  -> quick key/egress test
-app.post(`${API_BASE}/chat`, async (_req, res) => {
-  try {
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    const j = await httpJson(`${OPENAI_BASE}/chat/completions`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_KEY}`,
-        "Content-Type": "application/json",
-      },
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: "Hello" }],
       }),
     });
-    const data = await r.json();
-    if (!r.ok) {
-      return res
-        .status(r.status)
-        .json({ ok: false, error: data?.error?.message || "OpenAI error" });
-    }
-    res.json({ ok: true, answer: data?.choices?.[0]?.message?.content ?? "" });
+    return res.json({ ok: true, answer: j?.choices?.[0]?.message?.content ?? "" });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    const details = e?.response?.data || e?.message || String(e);
+    return errJson(res, e?.response?.status || 500, "OpenAI error", details);
   }
 });
 
-/* ------------------------ Admin: Sync Knowledge ---------------------- */
-
-function resolveSyncScript() {
-  const candidates = [
-    "./scripts/sync_knowledge_from_notion_files.mjs",
-    "./scripts/sync_knowledge_v4.mjs",
-  ];
-  for (const rel of candidates) {
-    const p = fileURLToPath(new URL(rel, import.meta.url));
-    if (fs.existsSync(p)) return p;
-  }
-  return null;
-}
-
-app.post(`${API_BASE}/admin/sync-knowledge`, async (req, res) => {
+// One-shot ask/answer
+app.post(`${API_BASE}/run`, async (req, res) => {
   try {
-    if (!ADMIN_TOKEN)
-      return res
-        .status(503)
-        .json({ ok: false, error: "Sync disabled: set ADMIN_API_TOKEN or JWT_SECRET" });
+    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const userText = b.message || b.text || b.input;
+    if (!userText || !String(userText).trim()) {
+      return errJson(res, 400, "message is required");
+    }
 
-    const auth = req.headers["authorization"] || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    if (token !== ADMIN_TOKEN) return res.status(401).json({ ok: false, error: "Unauthorized" });
+    // cookie-scoped thread (create if missing)
+    const cookies = parseCookies(req.headers.cookie || "");
+    let threadId = cookies[COOKIE_NAME];
+    if (!looksLikeThreadId(threadId)) {
+      threadId = await httpCreateThread();
+      setCookie(res, COOKIE_NAME, threadId);
+    }
 
-    const scriptPath = resolveSyncScript();
-    if (!scriptPath) return res.status(500).json({ ok: false, error: "Sync script not found" });
+    await httpAddMessage(threadId, userText);
+    const runId = await httpStartRun(threadId, b.model);
+    await httpWaitRun(threadId, runId);
+    const answer = await httpGetAnswer(threadId, runId);
 
-    const child = spawn(process.execPath, ["-r", "dotenv/config", scriptPath], {
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdout = "",
-      stderr = "";
-    const cap = (s, max = 200_000) => (s.length > max ? s.slice(-max) : s);
-    child.stdout.on("data", (d) => (stdout = cap(stdout + d.toString())));
-    child.stderr.on("data", (d) => (stderr = cap(stderr + d.toString())));
-
-    const KILL_AFTER_MS = +(process.env.SYNC_TIMEOUT_MS || 120_000);
-    let timedOut = false;
-    const t = setTimeout(() => {
-      timedOut = true;
-      try {
-        child.kill("SIGKILL");
-      } catch {}
-    }, KILL_AFTER_MS);
-
-    child.on("error", (err) => {
-      clearTimeout(t);
-      res.status(500).json({ ok: false, error: `spawn error: ${err.message}`, stdout, stderr });
-    });
-
-    child.on("close", (code) => {
-      clearTimeout(t);
-      const ok = code === 0 && !timedOut;
-      res.status(ok ? 200 : 500).json({ ok, code, timedOut, stdout: stdout.trim(), stderr: stderr.trim() });
-    });
+    return res.json({ ok: true, answer, thread_id: threadId, run_id: runId, mode: ASSISTANT_ID ? "assistant" : "model" });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    // graceful fallback to plain chat so the UI still gets an answer
+    try {
+      const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+      const userText = b.message || b.text || b.input;
+      if (!userText || !String(userText).trim()) throw e;
+
+      const j = await httpJson(`${OPENAI_BASE}/chat/completions`, {
+        method: "POST",
+        body: JSON.stringify({
+          model: MODEL,
+          messages: [{ role: "user", content: String(userText) }],
+        }),
+      });
+      const answer = j?.choices?.[0]?.message?.content ?? "";
+      return res.json({ ok: true, answer, thread_id: null, run_id: null, mode: "fallback" });
+    } catch (e2) {
+      const details = e2?.response?.data || e2?.message || String(e2);
+      return errJson(res, e2?.response?.status || 500, "OpenAI error", details);
+    }
   }
 });
 
-/* ---------------------------- 404 + Start --------------------------- */
+/* ------------- Back-compat aliases for old UIs (/threads) ------------- */
 
-app.use((_req, res) => res.status(404).json({ ok: false, error: "Not Found" }));
+// Create/reuse thread
+app.post("/threads", async (req, res) => {
+  try {
+    const cookies = parseCookies(req.headers.cookie || "");
+    let threadId = cookies[COOKIE_NAME];
+    if (!looksLikeThreadId(threadId)) {
+      threadId = await httpCreateThread();
+      setCookie(res, COOKIE_NAME, threadId);
+    }
+    return res.json({ id: threadId });
+  } catch (e) {
+    const details = e?.response?.data || e?.message || String(e);
+    return errJson(res, e?.response?.status || 500, "OpenAI error", details);
+  }
+});
 
-const PORT = process.env.PORT || 10000;
+// Append message (falls back to cookie thread if :threadId bad)
+app.post("/threads/:threadId/messages", async (req, res) => {
+  try {
+    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const text = b.message || b.text || b.input || b.content;
+    if (!text || !String(text).trim()) return errJson(res, 400, "message is required");
+    let { threadId } = req.params;
+    if (!looksLikeThreadId(threadId)) {
+      const cookies = parseCookies(req.headers.cookie || "");
+      threadId = cookies[COOKIE_NAME];
+      if (!looksLikeThreadId(threadId)) threadId = await httpCreateThread();
+      setCookie(res, COOKIE_NAME, threadId);
+    }
+    await httpAddMessage(threadId, text);
+    return res.json({ ok: true, thread_id: threadId });
+  } catch (e) {
+    const details = e?.response?.data || e?.message || String(e);
+    return errJson(res, e?.response?.status || 500, "OpenAI error", details);
+  }
+});
+
+// Start run (optional message in body)
+app.post("/threads/:threadId/runs", async (req, res) => {
+  try {
+    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const text = b.message || b.text || b.input;
+    let { threadId } = req.params;
+    if (!looksLikeThreadId(threadId)) {
+      const cookies = parseCookies(req.headers.cookie || "");
+      threadId = cookies[COOKIE_NAME];
+      if (!looksLikeThreadId(threadId)) threadId = await httpCreateThread();
+      setCookie(res, COOKIE_NAME, threadId);
+    }
+    if (text && String(text).trim()) await httpAddMessage(threadId, text);
+    const runId = await httpStartRun(threadId, b.model);
+    return res.json({ ok: true, thread_id: threadId, run_id: runId, status: "queued" });
+  } catch (e) {
+    const details = e?.response?.data || e?.message || String(e);
+    return errJson(res, e?.response?.status || 500, "OpenAI error", details);
+  }
+});
+
+/* -------------------- 404 + SPA fallback -------------------- */
+
+app.use((req, res, next) => {
+  if (req.path.startsWith(API_BASE) || req.path.startsWith("/threads")) {
+    return res.status(404).json({ ok: false, error: "Not Found" });
+  }
+  next();
+});
+
+app.get("*", (req, res, next) => {
+  if (req.path.startsWith(API_BASE) || req.path.startsWith("/threads")) return next();
+  const indexPath = path.join(__dirname, "public", "index.html");
+  res.sendFile(indexPath, (err) => { if (err) next(); });
+});
+
+/* -------------------- Start -------------------- */
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(
+    `[assistant] mode=${ASSISTANT_ID ? "assistant" : "model"} ${ASSISTANT_ID || MODEL} cookie=${COOKIE_NAME} secure=${COOKIE_SECURE}`
+  );
 });
