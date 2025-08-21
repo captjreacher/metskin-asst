@@ -148,6 +148,13 @@ const openai = new OpenAI({ apiKey: OPENAI_KEY });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const bodyObj = (req) => (typeof req.body === "string" ? safeParseJson(req.body) : (req.body || {}));
+const validateId = (res, id, prefix, name, status = 400) => {
+  if (!id?.startsWith(prefix)) {
+    res.status(status).json({ ok: false, error: `Invalid ${name}`, [name]: id });
+    return false;
+  }
+  return true;
+};
 
 /* ---------------------- Assistants Compat Routes -------------------- */
 
@@ -165,6 +172,7 @@ app.post("/threads", async (_req, res) => {
 app.post("/threads/:threadId/messages", async (req, res) => {
   try {
     const threadId = req.params.threadId;
+    if (!validateId(res, threadId, "thread_", "threadId")) return;
     const body = bodyObj(req);
     const text = body.content || body.message || body.text || "";
     if (!text) return res.status(400).json({ error: "Missing message text" });
@@ -179,6 +187,7 @@ app.post("/threads/:threadId/messages", async (req, res) => {
 app.post("/threads/:threadId/runs", async (req, res) => {
   try {
     const threadId = req.params.threadId;
+    if (!validateId(res, threadId, "thread_", "threadId")) return;
     const tool_resources = VS_IDS.length ? { file_search: { vector_store_ids: VS_IDS } } : undefined;
     const payload = ASST_DEFAULT
       ? { assistant_id: ASST_DEFAULT, tools: [{ type: "file_search" }], tool_resources }
@@ -194,16 +203,12 @@ app.post("/threads/:threadId/runs", async (req, res) => {
 app.get("/threads/:threadId/runs/:runId", async (req, res) => {
   try {
     const { threadId, runId } = req.params;
-    if (!threadId?.startsWith("thread_") || !runId?.startsWith("run_")) {
-      return res.status(400).json({
-        error: "Bad path parameters. Expect /threads/<thread_id>/runs/<run_id>",
-        got: { threadId, runId },
-      });
-    }
+    if (!validateId(res, threadId, "thread_", "threadId")) return;
+    if (!validateId(res, runId, "run_", "runId")) return;
     const run = await openai.beta.threads.runs.retrieve(threadId, runId);
     res.json(run);
   } catch (e) {
-    res.status(e.status || 500).json({ error: e.message, details: e.data ?? null });
+    res.status(e.status || 500).json({ ok: false, error: e.message, details: e.data ?? null });
   }
 });
 
@@ -226,9 +231,7 @@ app.post("/assistant/ask", async (req, res) => {
       const t = await openai.beta.threads.create();
       threadId = t.id;
     }
-    if (!threadId?.startsWith("thread_")) {
-      return res.status(400).json({ ok: false, error: "Invalid thread_id", threadId });
-    }
+    if (!validateId(res, threadId, "thread_", "thread_id")) return;
 
     // Add message
     await openai.beta.threads.messages.create(threadId, { role: "user", content: userText });
@@ -246,9 +249,7 @@ app.post("/assistant/ask", async (req, res) => {
 
     const run = await openai.beta.threads.runs.create(threadId, payload);
     const runId = run.id;
-    if (!runId?.startsWith("run_")) {
-      return res.status(502).json({ ok: false, error: "OpenAI returned unexpected run id", got: runId });
-    }
+    if (!validateId(res, runId, "run_", "run_id", 502)) return;
 
     // Poll via SDK
     let status = "queued";
