@@ -81,7 +81,7 @@ app.use(express.static(path.join(__dirname, "public")));
 // JSON for most routes
 app.use(express.json({ limit: "2mb" }));
 // Also accept raw text on key chat routes (PowerShell & odd clients)
-app.use(["/assistant/ask", "/send"], express.text({ type: "*/*", limit: "1mb" }));
+app.use(["/send"], express.text({ type: "*/*", limit: "1mb" }));
 
 // static GUI (served from /public) — NOW it's safe
 app.use(express.static(path.join(__dirname, "public")));
@@ -254,8 +254,14 @@ app.post("/assistant/ask", async (req, res) => {
     let status = "queued";
     do {
       await sleep(900);
-      const r = await openai.beta.threads.runs.retrieve(thread_id, run_id);
-      status = r.status;
+      try {
+        const r = await openai.beta.threads.runs.retrieve(thread_id, run_id);
+        status = r.status;
+      } catch (e) {
+        console.log(`[DEBUG] Error in runs.retrieve: ${e.message}`);
+        console.log(`[DEBUG] thread_id=${thread_id}, run_id=${run_id}`);
+        throw e; // re-throw the error
+      }
       if (DBG_OA) console.log(`[OA] run ${run_id} → ${status}`);
     } while (status === "queued" || status === "in_progress");
 
