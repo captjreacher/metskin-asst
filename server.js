@@ -146,13 +146,14 @@ const headersForLog = (h) => ({
 // - attaches vector_store_ids directly on the tool (Responses rejects tool_resources)
 const withKnowledge = (payload) => {
   const baseTools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
+  const toolResources = payload.tool_resources ? { ...payload.tool_resources } : {};
 
   // Find any existing file_search tool
   const fsIdx = baseTools.findIndex(t => t && t.type === 'file_search');
 
-  // Merge existing tool-level ids with env ids
-  const existingIds = (fsIdx >= 0 && Array.isArray(baseTools[fsIdx].vector_store_ids))
-    ? baseTools[fsIdx].vector_store_ids
+  // Merge existing resource ids with env ids
+  const existingIds = Array.isArray(toolResources?.file_search?.vector_store_ids)
+    ? toolResources.file_search.vector_store_ids
     : [];
 
   const vsIds = Array.from(new Set([
@@ -161,13 +162,11 @@ const withKnowledge = (payload) => {
   ])).filter(Boolean);
 
   if (vsIds.length) {
-    if (fsIdx === -1) {
-      baseTools.push({ type: 'file_search', vector_store_ids: vsIds });
-    } else {
-      baseTools[fsIdx] = { ...baseTools[fsIdx], type: 'file_search', vector_store_ids: vsIds };
-    }
+    if (fsIdx === -1) baseTools.push({ type: 'file_search' });
+    toolResources.file_search = { ...(toolResources.file_search || {}), vector_store_ids: vsIds };
   } else {
     if (fsIdx >= 0) baseTools.splice(fsIdx, 1);
+    if (toolResources.file_search) delete toolResources.file_search;
   }
 
   // Whitelist outgoing fields
@@ -184,6 +183,7 @@ const withKnowledge = (payload) => {
     ...(metadata ? { metadata } : {}),
     ...(assistant_id ? { assistant_id } : {}),
     ...(baseTools.length ? { tools: baseTools } : {}),
+    ...(Object.keys(toolResources).length ? { tool_resources: toolResources } : {}),
   };
 };
 
