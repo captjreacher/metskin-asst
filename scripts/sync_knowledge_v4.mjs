@@ -9,14 +9,15 @@ import crypto from "node:crypto";
 import { globSync } from "glob";
 import { Client as NotionClient } from "@notionhq/client";
 import { toFile } from "openai/uploads";
+import { patchOpenAIPositionalCompat } from "./openai_positional_compat.js";
 
 // ---------- OpenAI ----------
 if (!process.env.OPENAI_API_KEY) {
   console.error("❌ Missing OPENAI_API_KEY");
   process.exit(1);
 }
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
+const openai = new OpenAI({ apiKey: process.envOPENAI_API_KEY || process.env.OPENAI_KEY });
+patchOpenAIPositionalCompat(openai);
 // ---------- Paths & IDs ----------
 const KB_DIR = path.resolve("knowledge");
 const NAME = process.env.VS_NAME || "Metamorphosis KB";
