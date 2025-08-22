@@ -1,218 +1,180 @@
 // server.js
-// OpenAI Assistants API server
-// Node 20+, ESM ("type": "module" in package.json)
+// Chat Completions only (no Threads/Assistants) + legacy adapters
+// Node >= 20, ESM ("type": "module" in package.json)
 
 import express from "express";
-import OpenAI from "openai";
 import dotenv from "dotenv";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { patchOpenAIPositionalCompat } from "./openai_positional_compat.js";
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-/* ----------------- Config ----------------- */
+/* -------------------- Config -------------------- */
+
 const PORT = process.env.PORT || 10000;
 const API_BASE = process.env.API_BASE_PATH || "/api";
 
-// Declare the key FIRST…
 const OPENAI_KEY =
   process.env.OPENAI_API_KEY ||
   process.env.OPENAI_KEY ||
-  process.env.OPENAI || "";
-  
-  if (!OPENAI_KEY) {
-  console.error("FATAL: Missing OPENAI_API_KEY / OPENAI_KEY");
+  process.env.OPENAI ||
+  "";
+
+if (!OPENAI_KEY) {
+  console.error("FATAL: Missing OPENAI_API_KEY / OPENAI_KEY (project API key).");
   process.exit(1);
 }
-//* ----------------- App ----------------- */
+
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_BASE = "https://api.openai.com/v1";
+const OPENAI_BEARER = `Bearer ${OPENAI_KEY}`;
+
+/* -------------------- App -------------------- */
 
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", true);
 
-// Accept JSON and raw text (so you can POST plain text too)
+// Parse JSON and text/plain (do NOT catch all text so JSON isn't mis-parsed)
 app.use(express.json({ limit: "2mb" }));
-app.use(express.text({ type: "*/*", limit: "1mb" }));
+app.use(express.text({ type: "text/plain", limit: "1mb" }));
 
-// Static UI (optional)
+// Static UI
 app.use(express.static(path.join(__dirname, "public")));
 
-/* ----------------- Health ----------------- */
+/* -------------------- Helpers -------------------- */
 
-app.get("/health", (_req, res) => res.status(200).send("ok"));
-app.get("/healthz", (_req, res) => res.json({ ok: true }));
-// Accept message but keep no state
-app.post(`${API_BASE}/threads/:threadId/messages`, (req, res) => {
-  res.json({ ok: true, accepted: true, thread_id: req.params.threadId });
+async function chatComplete({ message, messages, model, system, temperature, top_p }) {
+  let msgs = Array.isArray(messages) ? messages : [];
+  if (!msgs.length && system) msgs.push({ role: "system", content: String(system) });
+  if (!msgs.length && message) msgs.push({ role: "user", content: String(message) });
+  if (!msgs.length) throw new Error("No input provided");
+
+  const r = await fetch(`${OPENAI_BASE}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: OPENAI_BEARER,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      model: model || DEFAULT_MODEL,
+      messages: msgs,
+      ...(typeof temperature === "number" ? { temperature } : {}),
+      ...(typeof top_p === "number" ? { top_p } : {}),
+    }),
+  });
+
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = new Error(data?.error?.message || `${r.status} ${r.statusText}`);
+    e.response = { status: r.status, data };
+    throw e;
+  }
+  return {
+    answer: data?.choices?.[0]?.message?.content ?? "",
+    usage: data?.usage ?? null,
+    model: model || DEFAULT_MODEL,
+  };
+}
+
+/* -------------------- Primary API (place BEFORE 404) -------------------- */
+
+// Quick key/egress check
+app.post(`${API_BASE}/selftest`, async (_req, res) => {
+  try {
+    const out = await chatComplete({ message: "Hello" });
+    res.json({ ok: true, ...out });
+  } catch (e) {
+    res.status(e?.response?.status || 500).json({ ok: false, error: e.message, details: e?.response?.data ?? null });
+  }
 });
 
-// “Run” immediately via chat-only path (no Threads)
+// New, preferred endpoint
+app.post(`${API_BASE}/chat`, async (req, res) => {
+  try {
+    const body = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const out = await chatComplete(body);
+    res.json({ ok: true, ...out });
+  } catch (e) {
+    res.status(e?.response?.status || 400).json({ ok: false, error: e.message || "Bad Request", details: e?.response?.data ?? null });
+  }
+});
+
+/* -------------------- Legacy adapters (keep old UI working) -------------------- */
+
+const fakeThreadId = () => `thread_chat_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+// POST /api/threads -> return a fake id
+app.post(`${API_BASE}/threads`, (_req, res) => res.json({ id: fakeThreadId() }));
+
+// POST /api/threads/:threadId/messages -> ack (no state)
+app.post(`${API_BASE}/threads/:threadId/messages`, (req, res) =>
+  res.json({ ok: true, accepted: true, thread_id: req.params.threadId })
+);
+
+// POST /api/threads/:threadId/runs -> generate answer via chat
 app.post(`${API_BASE}/threads/:threadId/runs`, async (req, res) => {
   try {
     const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
     const text = b.message || b.text || b.input || "Continue.";
-    // If you installed my chat-only helper, call that here; otherwise just stub:
-    // const { answer, model, usage } = await chatComplete({ message: text, model: b.model, system: b.system });
-    // res.json({ ok: true, answer, model, usage, thread_id: req.params.threadId, run_id: null, status: "completed", mode: "chat" });
-    res.json({ ok: true, thread_id: req.params.threadId, run_id: null, status: "completed", mode: "stub" });
+    const out = await chatComplete({ message: text, model: b.model, system: b.system });
+    res.json({ ok: true, ...out, thread_id: req.params.threadId, run_id: null, status: "completed", mode: "chat" });
   } catch (e) {
-    res.json({ ok: true, thread_id: req.params.threadId, run_id: null, status: "completed", mode: "stub" });
+    res.status(e?.response?.status || 500).json({ ok: false, error: e.message, details: e?.response?.data ?? null });
   }
 });
 
-/* ------------- OpenAI client ------------- */
-
-
-const ASSISTANT_ID = process.env.ASST_METAMORPHOSIS || process.env.ASST_DEFAULT;
-if (!ASSISTANT_ID) {
-  console.error("FATAL: Missing ASST_METAMORPHOSIS / ASST_DEFAULT");
-  process.exit(1);
-}
-// ---- HARD OVERRIDE: /api/threads must never 500 ----
-const SAFE_THREAD_PREFIX = "thread_chat_";
-function makeSafeThreadId() {
-  return SAFE_THREAD_PREFIX + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-}
-
-// Place this before any other handlers that might touch /api/threads
-app.post(`${API_BASE}/threads`, (req, res) => {
+// Old single-shot endpoint many UIs use
+app.post(`${API_BASE}/run`, async (req, res) => {
   try {
-    const id = makeSafeThreadId();
-    // Minimal JSON, no side effects
-    res.json({ id });
-  } catch (_e) {
-    // Even if something weird happens, still reply
-    res.status(200).json({ id: makeSafeThreadId() });
-  }
-});
-
-/* -------- API routes -------- */
-
-// Create a new thread
-app.post(`${API_BASE}/threads`, async (_req, res) => {
-  try {
-    const thread = await openai.beta.threads.create();
-    res.json({ ok: true, id: thread.id });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// Add a message to a thread
-app.post(`${API_BASE}/threads/:threadId/messages`, async (req, res) => {
-  try {
-    const threadId = req.params.threadId;
-    const b = req.body || {};
-    const text = b.message || b.text || b.input || b.content;
-    if (!text || !String(text).trim()) return res.status(400).json({ ok: false, error: "message is required" });
-
-    const msg = await openai.beta.threads.messages.create(threadId, { role: 'user', content: text });
-    res.json({ ok: true, id: msg.id });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// Create a run to get a new answer
-app.post(`${API_BASE}/threads/:threadId/runs`, async (req, res) => {
-  try {
-    const threadId = req.params.threadId;
-    const b = req.body || {};
+    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
     const text = b.message || b.text || b.input;
-
-    // Add message if one was provided
-    if (text) {
-      await openai.beta.threads.messages.create(threadId, { role: 'user', content: text });
-    }
-
-    const run = await openai.beta.threads.runs.create(threadId, { assistant_id: ASSISTANT_ID });
-
-    // Polling logic
-    while(true) {
-        const retrievedRun = await openai.beta.threads.runs.retrieve(threadId, run.id);
-        if (retrievedRun.status === 'completed') {
-            break;
-        }
-        if (retrievedRun.status === 'failed' || retrievedRun.status === 'cancelled' || retrievedRun.status === 'expired') {
-            throw new Error(`Run ended with status: ${retrievedRun.status}`);
-        }
-        await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-
-    const messages = await openai.beta.threads.messages.list(threadId);
-    const answer = messages.data[0].content[0].text.value;
-
-    res.json({ ok: true, answer, thread_id: threadId, run_id: run.id, status: "completed" });
+    if (!text || !String(text).trim()) return res.status(400).json({ ok: false, error: "message is required" });
+    const out = await chatComplete({ message: text, model: b.model, system: b.system });
+    res.json({ ok: true, ...out, thread_id: b.thread_id ?? null, run_id: null, mode: "chat" });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(e?.response?.status || 500).json({ ok: false, error: e.message, details: e?.response?.data ?? null });
   }
 });
 
-// (Optional) non-API legacy routes if some pages still call them
-app.post("/threads", async (_req, res) => {
-  try {
-    const thread = await openai.beta.threads.create();
-    res.json({ id: thread.id });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-app.post("/threads/:threadId/messages", (req, res) => res.json({ ok: true, accepted: true, thread_id: req.params.threadId }));
+// Non-API fallbacks (if something still calls them)
+app.post("/threads", (_req, res) => res.json({ id: fakeThreadId() }));
+app.post("/threads/:threadId/messages", (req, res) =>
+  res.json({ ok: true, accepted: true, thread_id: req.params.threadId })
+);
 app.post("/threads/:threadId/runs", async (req, res) => {
   try {
-    const threadId = req.params.threadId;
-    const b = req.body || {};
-    const text = b.message || b.text || b.input;
-
-    if (text) {
-      await openai.beta.threads.messages.create(threadId, { role: 'user', content: text });
-    }
-
-    const run = await openai.beta.threads.runs.create(threadId, { assistant_id: ASSISTANT_ID });
-
-    // Polling logic
-    while(true) {
-        const retrievedRun = await openai.beta.threads.runs.retrieve(threadId, run.id);
-        if (retrievedRun.status === 'completed') {
-            break;
-        }
-        if (retrievedRun.status === 'failed' || retrievedRun.status === 'cancelled' || retrievedRun.status === 'expired') {
-            throw new Error(`Run ended with status: ${retrievedRun.status}`);
-        }
-        await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-
-    const messages = await openai.beta.threads.messages.list(threadId);
-    const answer = messages.data[0].content[0].text.value;
-
-    res.json({ ok: true, answer, thread_id: threadId, run_id: run.id, status: "completed" });
+    const b = typeof req.body === "string" ? { message: req.body } : (req.body || {});
+    const text = b.message || b.text || b.input || "Continue.";
+    const out = await chatComplete({ message: text, model: b.model, system: b.system });
+    res.json({ ok: true, ...out, thread_id: req.params.threadId, run_id: null, status: "completed", mode: "chat" });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(e?.response?.status || 500).json({ ok: false, error: e.message, details: e?.response?.data ?? null });
   }
 });
 
-/* ----------------- 404 + SPA fallback ----------------- */
+/* -------------------- 404 + SPA fallback -------------------- */
 
+// API 404 — keep this AFTER all API routes above
 app.use((req, res, next) => {
-  if (req.path.startsWith(API_BASE)) {
-    return res.status(404).json({ ok: false, error: "Not Found" });
-  }
+  if (req.path.startsWith(API_BASE)) return res.status(404).json({ ok: false, error: "Not Found" });
   next();
 });
 
+// Serve index.html for everything else
 app.get("*", (req, res, next) => {
   if (req.path.startsWith(API_BASE)) return next();
   const indexPath = path.join(__dirname, "public", "index.html");
   res.sendFile(indexPath, (err) => { if (err) next(); });
 });
 
-/* ----------------- Start ----------------- */
+/* -------------------- Start -------------------- */
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`[assistants] id=${ASSISTANT_ID}`);
+  console.log(`[chat-only] model=${DEFAULT_MODEL}`);
 });
