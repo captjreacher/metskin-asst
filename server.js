@@ -105,7 +105,7 @@ async function assistantComplete({ message, thread_id, system }) {
   let status = run.status;
   while (status === "queued" || status === "in_progress") {
     await new Promise((r) => setTimeout(r, 500));
-    const r2 = await openai.beta.threads.runs.retrieve(threadId, run.id);
+    const r2 = await openai.beta.threads.runs.retrieve(run.id, { thread_id: threadId });
     status = r2.status;
   }
   if (status !== "completed") {
